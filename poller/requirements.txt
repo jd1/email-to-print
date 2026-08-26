@@ -1,0 +1,8 @@
+# Container OS dependencies for the print-poller image (poller/Dockerfile).
+# One Debian package name per line; '#' starts a comment.
+#   cups-client        = `lp`, submits jobs to the host's cupsd over IPP
+#   libreoffice-nogui  = `soffice`, converts Office docs to PDF
+#   fonts-dejavu-core  = base fonts so converted docs render text
+cups-client
+libreoffice-nogui
+fonts-dejavu-core

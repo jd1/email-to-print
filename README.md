@@ -77,7 +77,9 @@ The script polls that folder once a minute:
   spoofed mail is how you become a backscatter cannon.
 
 Stdlib Python only. The container's external dependencies are `lp`
-(cups-client) and `soffice` (libreoffice-nogui). There's a JSON health
+(cups-client) and `soffice` (libreoffice-nogui); they're listed in
+`poller/requirements.txt` and the Dockerfile installs them from there, so
+that file is the one place to add or remove packages. There's a JSON health
 endpoint on `127.0.0.1:2631/health` if you monitor things; it stays on
 localhost unless you rebind it.
 
