@@ -4,12 +4,13 @@
 Watches SOURCE_FOLDER (a Proton-via-Bridge mailbox) for messages addressed to
 PRINT_TO from allow-listed senders and prints them to a CUPS queue:
   - PDF/image attachments print natively
-  - Office-doc attachments convert via LibreOffice headless
+  - Office-doc attachments convert via a Gotenberg container
   - if no printable attachment and PRINT_BODY=true, the email body (HTML/text)
-    is rendered to PDF and printed (forward-an-email-to-print-it)
+    is rendered to PDF by Gotenberg's Chromium route and printed
 Every processed message is MOVED out of SOURCE_FOLDER (-> PROCESSED_FOLDER on
 success, REJECTED_FOLDER otherwise) which is the idempotency guard.
-Stdlib only + external `lp` and `soffice`. Fail-closed on the allow-list.
+Stdlib plus `requests`; external deps are `lp` (CUPS) and a Gotenberg service.
+Fail-closed on the allow-list.
 Run with --once for a single poll cycle (exit 0 on success, 1 on failure);
 without it the poller loops forever.
 """
@@ -18,6 +19,8 @@ from email.header import decode_header, make_header
 from email.utils import parseaddr, getaddresses, formatdate, make_msgid
 from email.message import EmailMessage
 import imaplib, smtplib, threading, json as _json
+import html as _html
+import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 def env(k, d=None, req=False):
@@ -38,6 +41,8 @@ SOURCE_FOLDER = env("SOURCE_FOLDER", "INBOX")
 ALLOWED   = set(a.strip().lower() for a in env("ALLOWED_SENDERS", "").split(",") if a.strip())
 PRINTER   = env("PRINTER", req=True)
 CUPS_SERVER = env("CUPS_SERVER", "127.0.0.1:631")
+GOTENBERG_URL = env("GOTENBERG_URL", "http://127.0.0.1:3000").rstrip("/")
+GOTENBERG_TIMEOUT = float(env("GOTENBERG_TIMEOUT", "120"))
 PROCESSED_FOLDER = env("PROCESSED_FOLDER", "Folders/Printed")
 REJECTED_FOLDER  = env("REJECTED_FOLDER", "Folders/Print-Rejected")
 POLL_INTERVAL = int(env("POLL_INTERVAL", "60"))
@@ -82,7 +87,9 @@ def _start_health():
 
 NATIVE_CTYPES = {"application/pdf","image/jpeg","image/png","image/gif","image/webp","image/bmp","image/tiff"}
 NATIVE_EXT = {".pdf",".jpg",".jpeg",".png",".gif",".webp",".bmp",".tif",".tiff"}
-OFFICE_EXT = {".doc",".docx",".odt",".rtf",".xls",".xlsx",".ods",".ppt",".pptx",".odp",".txt",".csv"}
+# .txt used to go through LibreOffice; it is skipped until the
+# Chromium-format work lands (see TODO.md).
+OFFICE_EXT = {".doc",".docx",".odt",".rtf",".xls",".xlsx",".ods",".ppt",".pptx",".odp",".csv"}
 
 def dh(s):
     try: return str(make_header(decode_header(s or "")))
@@ -129,31 +136,60 @@ def print_file(path, opts):
     except Exception as e:
         return False, str(e)
 
-def to_pdf(path, workdir):
+def _gotenberg_post(route, filename, content):
+    """POST one file to Gotenberg; return PDF bytes, or None on failure."""
+    if DRY_RUN:
+        log.info("[dry-run] would POST %s%s (%s, %d bytes)",
+                 GOTENBERG_URL, route, filename, len(content))
+        return b""
     try:
-        r = subprocess.run(["soffice","--headless","--convert-to","pdf","--outdir",workdir,path],
-                           capture_output=True, text=True, timeout=180)
-    except Exception as e:
-        log.error("soffice exec failed: %s", e); return None
-    out = os.path.join(workdir, os.path.splitext(os.path.basename(path))[0] + ".pdf")
-    if r.returncode == 0 and os.path.exists(out): return out
-    log.error("soffice failed for %s: %s", path, (r.stdout + r.stderr).strip()); return None
+        response = requests.post(GOTENBERG_URL + route,
+                                 files={"files": (filename, content)},
+                                 timeout=GOTENBERG_TIMEOUT)
+    except requests.exceptions.RequestException as error:
+        log.error("gotenberg unreachable for %s: %s", filename, error); return None
+    if response.status_code != 200 or not response.content.startswith(b"%PDF"):
+        log.error("gotenberg %s failed for %s: HTTP %s %s", route, filename,
+                  response.status_code, response.text[:200]); return None
+    return response.content
 
-def render_body(msg, wd):
-    html = text = None
+def to_pdf(source_path, output_dir):
+    """Office doc -> PDF via Gotenberg's LibreOffice route."""
+    with open(source_path, "rb") as source_file:
+        source_bytes = source_file.read()
+    pdf_bytes = _gotenberg_post("/forms/libreoffice/convert",
+                                os.path.basename(source_path), source_bytes)
+    if pdf_bytes is None: return None
+    output_path = os.path.join(output_dir, os.path.splitext(os.path.basename(source_path))[0] + ".pdf")
+    with open(output_path, "wb") as output_file: output_file.write(pdf_bytes)
+    return output_path
+
+def convert_html(html_bytes, output_dir, name_stem):
+    """HTML -> PDF via Gotenberg's Chromium route (upload must be index.html)."""
+    pdf_bytes = _gotenberg_post("/forms/chromium/convert/html", "index.html", html_bytes)
+    if pdf_bytes is None: return None
+    output_path = os.path.join(output_dir, name_stem + ".pdf")
+    with open(output_path, "wb") as output_file: output_file.write(pdf_bytes)
+    return output_path
+
+def render_body(msg, output_dir):
+    html_bytes = text_bytes = None
     for part in msg.walk():
         if part.get_content_maintype() == "multipart": continue
         if "attachment" in (part.get("Content-Disposition") or "").lower(): continue
-        ct = part.get_content_type()
-        if ct == "text/html" and html is None: html = part.get_payload(decode=True)
-        elif ct == "text/plain" and text is None: text = part.get_payload(decode=True)
-    if html:
-        src = os.path.join(wd, "body.html"); open(src, "wb").write(html)
-    elif text:
-        src = os.path.join(wd, "body.txt"); open(src, "wb").write(text)
-    else:
-        return None
-    return to_pdf(src, wd)
+        content_type = part.get_content_type()
+        if content_type == "text/html" and html_bytes is None:
+            html_bytes = part.get_payload(decode=True)
+        elif content_type == "text/plain" and text_bytes is None:
+            text_bytes = part.get_payload(decode=True)
+    if html_bytes:
+        return convert_html(html_bytes, output_dir, "email-body")
+    if text_bytes:
+        escaped_body = "<pre>" + _html.escape(text_bytes.decode("utf-8", errors="replace")) + "</pre>"
+        page_bytes = ("<html><head><meta charset='utf-8'></head><body>"
+                      + escaped_body + "</body></html>").encode()
+        return convert_html(page_bytes, output_dir, "email-body")
+    return None
 
 def auth_ok(msg):
     if not REQUIRE_AUTH_PASS: return True
