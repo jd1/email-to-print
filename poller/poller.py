@@ -10,6 +10,8 @@ PRINT_TO from allow-listed senders and prints them to a CUPS queue:
 Every processed message is MOVED out of SOURCE_FOLDER (-> PROCESSED_FOLDER on
 success, REJECTED_FOLDER otherwise) which is the idempotency guard.
 Stdlib only + external `lp` and `soffice`. Fail-closed on the allow-list.
+Run with --once for a single poll cycle (exit 0 on success, 1 on failure);
+without it the poller loops forever.
 """
 import os, ssl, sys, time, email, subprocess, tempfile, logging, mimetypes
 from email.header import decode_header, make_header
@@ -243,21 +245,25 @@ def poll_once(M):
             _state["errors_total"] += 1; log.exception("error on uid=%s: %s", uid, e)
     _state["last_poll"] = time.time(); _state["last_poll_ok"] = True
 
-def main():
-    log.info("print-poller up: user=%s source=%s printer=%s match=%s print_body=%s allow=%s dry=%s",
-             IMAP_USER, SOURCE_FOLDER, PRINTER, PRINT_TO, PRINT_BODY, sorted(ALLOWED) or "(NONE-fail-closed)", DRY_RUN)
+def main(once=False):
+    log.info("print-poller up: user=%s source=%s printer=%s match=%s print_body=%s allow=%s dry=%s once=%s",
+             IMAP_USER, SOURCE_FOLDER, PRINTER, PRINT_TO, PRINT_BODY, sorted(ALLOWED) or "(NONE-fail-closed)", DRY_RUN, once)
     if not ALLOWED: log.warning("ALLOWED_SENDERS empty -> fail-closed")
     threading.Thread(target=_start_health, daemon=True).start(); log.info("health endpoint on :%d/health", HEALTH_PORT)
     while True:
+        ok = False
         try:
             M = imap_connect()
             try: poll_once(M)
             finally:
                 try: M.logout()
                 except Exception: pass
+            ok = True
         except Exception as e:
             log.exception("poll cycle failed: %s", e)
+        if once:
+            sys.exit(0 if ok else 1)
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
-    main()
+    main(once="--once" in sys.argv[1:])
