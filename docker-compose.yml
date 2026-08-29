@@ -12,18 +12,29 @@ services:
       - bridge-data:/root
     network_mode: host   # exposes IMAP on 127.0.0.1:1143, SMTP on 127.0.0.1:1025
 
+  # Document conversion for the poller (LibreOffice + Chromium routes).
+  # Bound to localhost only. If you already run Gotenberg (e.g. for
+  # Paperless-ngx), delete this service and point GOTENBERG_URL at the
+  # existing instance instead.
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: gotenberg
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  # Image published by .github/workflows/docker-publish.yml on pushes to main
+  # and on v* tags. To develop locally: `build: ./poller` instead of `image:`.
   print-poller:
-    build: ./poller
+    image: ghcr.io/jd1/email-to-print:latest
     container_name: print-poller
     restart: unless-stopped
-    network_mode: host   # needs to reach the bridge on localhost and cupsd on the host
+    network_mode: host   # needs to reach the bridge on localhost, cupsd and Gotenberg on the host
     env_file: .env
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    volumes:
-      - ./poller/poller.py:/app/poller.py:ro
 
 volumes:
   bridge-data:
