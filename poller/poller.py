@@ -88,7 +88,7 @@ def _start_health():
 NATIVE_CTYPES = {"application/pdf","image/jpeg","image/png","image/gif","image/webp","image/bmp","image/tiff"}
 NATIVE_EXT = {".pdf",".jpg",".jpeg",".png",".gif",".webp",".bmp",".tif",".tiff"}
 # .txt used to go through LibreOffice; it is skipped until the
-# Chromium-format work lands (see TODO.md).
+# Chromium-format work lands (issue #6).
 OFFICE_EXT = {".doc",".docx",".odt",".rtf",".xls",".xlsx",".ods",".ppt",".pptx",".odp",".csv"}
 
 def dh(s):

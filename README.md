@@ -81,6 +81,34 @@ Stdlib Python only. The container's external dependencies are `lp`
 endpoint on `127.0.0.1:2631/health` if you monitor things; it stays on
 localhost unless you rebind it.
 
+## What this fork changes
+
+The mail handling is all upstream behavior; this fork only replaces the
+conversion engine and the deployment:
+
+- **Conversion runs in a Gotenberg container** (`gotenberg/gotenberg:8`),
+  not a bundled LibreOffice. Office documents go to
+  `POST /forms/libreoffice/convert`; mail with no printable attachment is
+  rendered through `POST /forms/chromium/convert/html` (the upload must be
+  named `index.html`, as the route requires). The poller image drops the
+  ~700MB LibreOffice install — its only added dependency is `requests`,
+  pinned in `poller/requirements.txt`.
+- **`docker-compose.yml` starts Gotenberg too**, bound to
+  `127.0.0.1:3000`. If you already run Gotenberg (e.g. for
+  Paperless-ngx), delete that service and point `GOTENBERG_URL` at the
+  existing instance.
+- **The poller image is published to GHCR**
+  (`ghcr.io/jd1/email-to-print`) by a GitHub Actions workflow on
+  pushes to `main` and on `v*` tags, instead of being built on the host.
+- **`.txt` attachments are skipped for now.** That path used the bundled
+  LibreOffice; it comes back with the wider Chromium-format work (`.html`,
+  `.md`, `.txt`). Everything deferred from the fuller version of this
+  work (retries, more formats, drained-INBOX mode, ...) is tracked in
+  issue #6.
+
+Everything else in this README describes the upstream design and still
+applies, except where it mentions `soffice`/LibreOffice inside the poller.
+
 ## Setup
 
 1. Get your printer working in CUPS on the Docker host first. `lpstat -p`
@@ -93,7 +121,8 @@ localhost unless you rebind it.
 4. If you're on Proton: `docker compose run --rm protonmail-bridge init`
    once to log in interactively. Anyone else: delete that service from the
    compose file and point `IMAP_HOST`/`IMAP_PORT` at your provider.
-5. `docker compose up -d --build`
+5. `docker compose up -d` (pulls the published poller image and starts
+   Gotenberg)
 6. Send yourself a test with `DRY_RUN=true` first. The logs show what would
    have printed. Then flip it off.
 
