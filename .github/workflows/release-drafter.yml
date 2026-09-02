@@ -17,6 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: release-drafter/release-drafter@v6
+      - uses: release-drafter/release-drafter@v7
+        with:
+          # Pin the first release to 0.2.0 as requested in issue #7.
+          # Remove this input once v0.2.0 is published; the semver
+          # increments from the categories take over afterwards.
+          version: 0.2.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

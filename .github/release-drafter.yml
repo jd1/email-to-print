@@ -1,25 +1,33 @@
 name-template: "v$RESOLVED_VERSION"
 tag-template: "v$RESOLVED_VERSION"
 
-# Pins the next draft to 0.2.0 as requested in issue #7.
-# Delete this line once v0.2.0 is published; the semver bump
-# (feat -> minor, fix -> patch) takes over afterwards.
-next-version: 0.2.0
-bump-version: semver
-
-conventional-commits:
-  preset: angular
-  categories:
-    - title: "Features"
-      types: [feat]
-    - title: "Bug Fixes"
-      types: [fix]
-    - title: "Performance"
-      types: [perf]
-    - title: "Refactoring"
-      types: [refactor]
-  breaking:
-    labels: [breaking]
+categories:
+  - title: "Features"
+    semver-increment: minor
+    when:
+      conventional:
+        type: feat
+  - title: "Bug Fixes"
+    semver-increment: patch
+    when:
+      conventional:
+        type: fix
+  - title: "Performance"
+    semver-increment: patch
+    when:
+      conventional:
+        type: perf
+  - title: "Refactoring"
+    when:
+      conventional:
+        type: refactor
+  - type: version-resolver
+    semver-increment: major
+    when:
+      conventional:
+        breaking: true
+  - type: version-resolver
+    semver-increment: patch
 
 template: |
   $CHANGES
