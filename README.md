@@ -100,6 +100,11 @@ conversion engine and the deployment:
 - **The poller image is published to GHCR**
   (`ghcr.io/jd1/email-to-print`) by a GitHub Actions workflow on
   pushes to `main` and on `v*` tags, instead of being built on the host.
+- **`SKIP_PRINT=true` test mode.** Runs the real Gotenberg conversion but
+  skips `lp` — verify that your files actually convert, without using
+  paper. Confirmations say "Skipped printing: ..." instead of
+  "Printed: ...". (`DRY_RUN=true` is the other extreme: no conversion, no
+  print, just logs.)
 - **`.txt` attachments are skipped for now.** That path used the bundled
   LibreOffice; it comes back with the wider Chromium-format work (`.html`,
   `.md`, `.txt`). Everything deferred from the fuller version of this
