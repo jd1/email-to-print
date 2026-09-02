@@ -1,0 +1,33 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+
+categories:
+  - title: "Features"
+    semver-increment: minor
+    when:
+      conventional:
+        type: feat
+  - title: "Bug Fixes"
+    semver-increment: patch
+    when:
+      conventional:
+        type: fix
+  - title: "Performance"
+    semver-increment: patch
+    when:
+      conventional:
+        type: perf
+  - title: "Refactoring"
+    when:
+      conventional:
+        type: refactor
+  - type: version-resolver
+    semver-increment: major
+    when:
+      conventional:
+        breaking: true
+  - type: version-resolver
+    semver-increment: patch
+
+template: |
+  $CHANGES
