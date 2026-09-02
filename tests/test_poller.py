@@ -135,6 +135,29 @@ class BodyTest(unittest.TestCase):
                                              self.output_dir.name))
 
 
+class FakeImap:
+    def __init__(self, raw_bytes):
+        self.raw_bytes = raw_bytes
+        self.moved_uids = []
+    def uid(self, command, *args):
+        if command == "FETCH":
+            return "OK", [(b"1 (RFC822)", self.raw_bytes)]
+        if command == "MOVE":
+            self.moved_uids.append(args)
+        return "OK", []
+
+
+class FakeSmtp:
+    instances = []
+    def __init__(self, host, port, timeout=None):
+        self.sent_messages = []
+        FakeSmtp.instances.append(self)
+    def starttls(self, context=None): pass
+    def login(self, user, password): pass
+    def send_message(self, message): self.sent_messages.append(message)
+    def quit(self): pass
+
+
 class RoutingTest(unittest.TestCase):
     def _build_message(self, attachments):
         msg = EmailMessage()
@@ -153,23 +176,32 @@ class RoutingTest(unittest.TestCase):
             ("notes.txt", "text/plain", b"hi"),
         ])
 
-        class FakeImap:
-            def __init__(self, raw_bytes):
-                self.raw_bytes = raw_bytes
-                self.moved_uids = []
-            def uid(self, command, *args):
-                if command == "FETCH":
-                    return "OK", [(b"1 (RFC822)", self.raw_bytes)]
-                if command == "MOVE":
-                    self.moved_uids.append(args)
-                return "OK", []
-
         fake_imap = FakeImap(msg.as_bytes())
         with mock.patch.object(poller, "print_file", return_value=(True, "ok")) as print_mock:
             poller.process(fake_imap, "1")
         self.assertEqual(http_calls, [(LIBREOFFICE_URL, "01-rep.docx")])  # .txt skipped
         self.assertEqual(print_mock.call_count, 1)                        # only converted docx
         self.assertEqual(fake_imap.moved_uids, [("1", poller.PROCESSED_FOLDER)])
+
+    def test_skip_print_converts_and_skips_lp(self):
+        poller.SKIP_PRINT = True
+        self.addCleanup(lambda: setattr(poller, "SKIP_PRINT", False))
+        poller.CONFIRM_REPLY = True
+        self.addCleanup(lambda: setattr(poller, "CONFIRM_REPLY", False))
+        stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
+        http_calls[:] = []
+        msg = self._build_message([
+            ("rep.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", b"x"),
+        ])
+        fake_imap = FakeImap(msg.as_bytes())
+        with mock.patch.object(poller.smtplib, "SMTP", FakeSmtp):
+            poller.process(fake_imap, "1")
+        # Real conversion happened; the print step short-circuits before `lp`.
+        self.assertEqual(http_calls, [(LIBREOFFICE_URL, "01-rep.docx")])
+        self.assertEqual(fake_imap.moved_uids, [("1", poller.PROCESSED_FOLDER)])
+        sent_messages = FakeSmtp.instances[-1].sent_messages
+        self.assertEqual(len(sent_messages), 1)
+        self.assertTrue(sent_messages[0].get_content().startswith("Skipped printing: rep.docx"))
 
 
 class ExtensionTest(unittest.TestCase):

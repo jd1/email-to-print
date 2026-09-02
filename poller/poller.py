@@ -11,6 +11,8 @@ Every processed message is MOVED out of SOURCE_FOLDER (-> PROCESSED_FOLDER on
 success, REJECTED_FOLDER otherwise) which is the idempotency guard.
 Stdlib plus `requests`; external deps are `lp` (CUPS) and a Gotenberg service.
 Fail-closed on the allow-list.
+SKIP_PRINT=true runs the real Gotenberg conversion but skips `lp`
+(conversion test); DRY_RUN=true does neither.
 Run with --once for a single poll cycle (exit 0 on success, 1 on failure);
 without it the poller loops forever.
 """
@@ -50,6 +52,7 @@ MAX_MB    = float(env("MAX_ATTACH_MB", "25"))
 CONFIRM_REPLY = env("CONFIRM_REPLY", "true").lower() == "true"
 PRINT_BODY = env("PRINT_BODY", "true").lower() == "true"
 DRY_RUN   = env("DRY_RUN", "false").lower() == "true"
+SKIP_PRINT = env("SKIP_PRINT", "false").lower() == "true"
 REQUIRE_AUTH_PASS = env("REQUIRE_AUTH_PASS", "false").lower() == "true"
 TLS_VERIFY = env("TLS_VERIFY", "true").lower() == "true"
 IMAP_SSL  = env("IMAP_SSL", "false").lower() == "true"
@@ -130,6 +133,9 @@ def print_file(path, opts):
     cmd += ["--", path]
     log.info("printing %s (%s)", os.path.basename(path), " ".join(cmd))
     if DRY_RUN: return True, "dry-run"
+    if SKIP_PRINT:
+        log.info("[skip-print] %s converted, not submitting to CUPS", os.path.basename(path))
+        return True, "skip-print"
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         return r.returncode == 0, (r.stdout + r.stderr).strip()
@@ -190,6 +196,9 @@ def render_body(msg, output_dir):
                       + escaped_body + "</body></html>").encode()
         return convert_html(page_bytes, output_dir, "email-body")
     return None
+
+def _print_label():
+    return "Skipped printing: " if SKIP_PRINT else "Printed: "
 
 def auth_ok(msg):
     if not REQUIRE_AUTH_PASS: return True
@@ -262,9 +271,9 @@ def process(M, uid):
             else:
                 errors.append("no printable attachment and no renderable body")
     if printed and not errors:
-        move(M, uid, PROCESSED_FOLDER); send_reply(msg, frm, "ok", "Printed: " + ", ".join(printed)); _state["printed_total"] += 1; log.info("DONE printed=%s", printed)
+        move(M, uid, PROCESSED_FOLDER); send_reply(msg, frm, "ok", _print_label() + ", ".join(printed)); _state["printed_total"] += 1; log.info("DONE printed=%s", printed)
     elif printed:
-        move(M, uid, PROCESSED_FOLDER); send_reply(msg, frm, "partial", "Printed: " + ", ".join(printed) + "\nErrors: " + "; ".join(errors)); log.warning("PARTIAL printed=%s errors=%s", printed, errors)
+        move(M, uid, PROCESSED_FOLDER); send_reply(msg, frm, "partial", _print_label() + ", ".join(printed) + "\nErrors: " + "; ".join(errors)); log.warning("PARTIAL printed=%s errors=%s", printed, errors)
     else:
         move(M, uid, REJECTED_FOLDER); send_reply(msg, frm, "failed", "Nothing could be printed. " + "; ".join(errors)); _state["rejected_total"] += 1; log.warning("NO-PRINT errors=%s", errors)
 
@@ -282,8 +291,8 @@ def poll_once(M):
     _state["last_poll"] = time.time(); _state["last_poll_ok"] = True
 
 def main(once=False):
-    log.info("print-poller up: user=%s source=%s printer=%s match=%s print_body=%s allow=%s dry=%s once=%s",
-             IMAP_USER, SOURCE_FOLDER, PRINTER, PRINT_TO, PRINT_BODY, sorted(ALLOWED) or "(NONE-fail-closed)", DRY_RUN, once)
+    log.info("print-poller up: user=%s source=%s printer=%s match=%s print_body=%s allow=%s dry=%s skip_print=%s once=%s",
+             IMAP_USER, SOURCE_FOLDER, PRINTER, PRINT_TO, PRINT_BODY, sorted(ALLOWED) or "(NONE-fail-closed)", DRY_RUN, SKIP_PRINT, once)
     if not ALLOWED: log.warning("ALLOWED_SENDERS empty -> fail-closed")
     threading.Thread(target=_start_health, daemon=True).start(); log.info("health endpoint on :%d/health", HEALTH_PORT)
     while True:
