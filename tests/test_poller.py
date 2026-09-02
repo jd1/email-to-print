@@ -174,6 +174,9 @@ class FakeImap:
         self.raw_bytes = raw_bytes
         self.moved_uids = []
 
+    def create(self, folder_name):
+        return "OK", []
+
     def uid(self, command, *args):
         if command == "FETCH":
             return "OK", [(b"1 (RFC822)", self.raw_bytes)]
