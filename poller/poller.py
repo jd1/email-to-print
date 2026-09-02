@@ -391,6 +391,7 @@ def process(M, uid):
     if not auth_ok(msg):
         log.warning("REJECT failed SPF/DKIM: %s", frm)
         move(M, uid, REJECTED_FOLDER)
+        _state["rejected_total"] += 1
         return
     printed, errors = [], []
     with tempfile.TemporaryDirectory() as wd:
