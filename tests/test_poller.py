@@ -2,7 +2,7 @@
 """Unit tests for the Gotenberg conversion path. No IMAP/SMTP/network:
 `requests` is stubbed before poller is imported, `lp` is mocked per-test."""
 
-import os, sys, email, tempfile, types, unittest
+import os, sys, email, tempfile, types, time, unittest
 from email.message import EmailMessage
 from unittest import mock
 
@@ -272,6 +272,90 @@ class ExtensionTest(unittest.TestCase):
         # .txt used to be converted by the bundled LibreOffice; skipped now.
         self.assertNotIn(".txt", poller.OFFICE_EXT)
         self.assertIn(".csv", poller.OFFICE_EXT)
+
+
+class RetryTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_limit = poller.RETRY_LIMIT
+        self._retries_dir = tempfile.mkdtemp()
+        self._orig_retry_file = poller._RETRY_FILE
+        poller._RETRY_FILE = os.path.join(self._retries_dir, "retries.json")
+        self.addCleanup(setattr, poller, "RETRY_LIMIT", self._orig_limit)
+        self.addCleanup(setattr, poller, "_RETRY_FILE", self._orig_retry_file)
+
+        def _cleanup_retries_dir():
+            rf = os.path.join(self._retries_dir, "retries.json")
+            if os.path.exists(rf):
+                os.unlink(rf)
+            if os.path.exists(self._retries_dir):
+                os.rmdir(self._retries_dir)
+
+        self.addCleanup(_cleanup_retries_dir)
+
+    def _build_message(self):
+        msg = EmailMessage()
+        msg["From"] = "a@example.com"
+        msg["To"] = "print@example.com"
+        msg["Subject"] = "test retry"
+        msg["Message-ID"] = "<retry-test@example.com>"
+        msg.set_content("body")
+        return msg
+
+    def test_retry_counter_increments(self):
+        msg = self._build_message()
+        key = poller._retry_key(msg)
+        state = poller._load_retries()
+        self.assertEqual(state, {})
+        state[key] = {"count": 1, "ts": 1000.0}
+        poller._save_retries(state)
+        state = poller._load_retries()
+        self.assertEqual(state[key]["count"], 1)
+
+    def test_terminal_at_cap(self):
+        poller.RETRY_LIMIT = 2
+        msg = self._build_message()
+        key = poller._retry_key(msg)
+
+        stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
+        http_calls[:] = []
+
+        fake_imap = FakeImap(msg.as_bytes())
+        # First attempt — transient failure, stays in SOURCE_FOLDER
+        with mock.patch.object(poller, "print_file", side_effect=poller.TransientError("lp down")):
+            poller.process(fake_imap, "1")
+        self.assertEqual(fake_imap.moved_uids, [])
+        state = poller._load_retries()
+        self.assertEqual(state[key]["count"], 1)
+
+        # Second attempt — at cap, moves to REJECTED_FOLDER
+        fake_imap2 = FakeImap(msg.as_bytes())
+        with mock.patch.object(poller, "print_file", side_effect=poller.TransientError("lp down")):
+            poller.process(fake_imap2, "1")
+        self.assertEqual(fake_imap2.moved_uids, [("1", poller.REJECTED_FOLDER)])
+        state = poller._load_retries()
+        self.assertNotIn(key, state)
+
+    def test_gc_removes_stale_entries(self):
+        state = {
+            "old": {"count": 1, "ts": 0.0},
+            "new": {"count": 1, "ts": time.time()},
+        }
+        cleaned = poller._gc_retries(state)
+        self.assertNotIn("old", cleaned)
+        self.assertIn("new", cleaned)
+
+    def test_retry_key_from_message_id(self):
+        msg = self._build_message()
+        key = poller._retry_key(msg)
+        self.assertEqual(key, "<retry-test@example.com>")
+
+    def test_retry_key_fallback_hash(self):
+        msg = EmailMessage()
+        msg["Date"] = "Mon, 1 Jan 2024 00:00:00 +0000"
+        msg["Subject"] = "test"
+        msg["From"] = "a@example.com"
+        key = poller._retry_key(msg)
+        self.assertTrue(key.startswith("h:"))
 
 
 if __name__ == "__main__":

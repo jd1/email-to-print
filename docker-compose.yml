@@ -29,8 +29,12 @@ services:
     image: ghcr.io/jd1/email-to-print:latest
     container_name: print-poller
     restart: unless-stopped
+    read_only: true
+    tmpfs: /tmp
     network_mode: host   # needs to reach the bridge on localhost, cupsd and Gotenberg on the host
     env_file: .env
+    volumes:
+      - mailprint-state:/state
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -38,3 +42,4 @@ services:
 
 volumes:
   bridge-data:
+  mailprint-state:
