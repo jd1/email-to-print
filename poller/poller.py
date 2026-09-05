@@ -99,6 +99,7 @@ _state = {
     "printed_total": 0,
     "rejected_total": 0,
     "errors_total": 0,
+    "pending_messages": 0,
 }
 
 _RETRY_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", ""), "mailprint")
@@ -171,6 +172,7 @@ class _Health(BaseHTTPRequestHandler):
                 "printed_total": _state["printed_total"],
                 "rejected_total": _state["rejected_total"],
                 "errors_total": _state["errors_total"],
+                "pending_messages": _state["pending_messages"],
                 "uptime_s": int(time.time() - _state["started"]),
             }
         ).encode()
@@ -603,6 +605,14 @@ def poll_once(M):
         except Exception as e:
             _state["errors_total"] += 1
             log.exception("error on uid=%s: %s", uid, e)
+    # Recount remaining messages (retry cases stay in SOURCE_FOLDER).
+    try:
+        typ2, data2 = M.uid("SEARCH", None, "ALL")
+        _state["pending_messages"] = (
+            len(data2[0].split()) if typ2 == "OK" and data2 and data2[0] else 0
+        )
+    except Exception:
+        pass
     _state["last_poll"] = time.time()
     _state["last_poll_ok"] = True
 
@@ -637,6 +647,7 @@ def main(once=False):
                     pass
             ok = True
         except Exception as e:
+            _state["last_poll_ok"] = False
             log.exception("poll cycle failed: %s", e)
         if once:
             sys.exit(0 if ok else 1)
