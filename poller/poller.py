@@ -394,9 +394,6 @@ def process(M, uid):
     if PRINT_TO not in addrs(
         msg, "To", "Cc", "Delivered-To", "X-Original-To", "X-Forwarded-To"
     ):
-        # In the watch folder but not addressed to the print alias (misfiled,
-        # or Bcc which carries no header). Move it out so it isn't refetched
-        # every poll. If you legitimately Bcc your printer, stop.
         log.warning(
             "REJECT not addressed to %s (in %s anyway)", PRINT_TO, SOURCE_FOLDER
         )
@@ -425,61 +422,66 @@ def process(M, uid):
         return
     printed, errors = [], []
     with tempfile.TemporaryDirectory() as wd:
-        try:
-            idx = 0
-            for part in msg.walk():
-                if part.get_content_maintype() == "multipart":
-                    continue
-                fn = dh(part.get_filename() or "")
-                disp = (part.get("Content-Disposition") or "").lower()
-                ctype = (part.get_content_type() or "").lower()
-                if not fn and "attachment" not in disp:
-                    continue
-                payload = part.get_payload(decode=True)
-                if not payload:
-                    continue
-                if len(payload) > MAX_MB * 1024 * 1024:
-                    errors.append(f"{fn or ctype}: exceeds {MAX_MB}MB")
-                    continue
-                ext = os.path.splitext(fn)[1].lower()
-                raw = (
-                    os.path.basename(fn)
-                    if fn
-                    else "attachment" + (mimetypes.guess_extension(ctype) or ".bin")
-                )
-                clean = (
-                    "".join(c if c.isalnum() or c in "._- " else "_" for c in raw)[
-                        -120:
-                    ].strip(". ")
-                    or "attachment.bin"
-                )
-                idx += 1
-                safe = os.path.join(wd, f"{idx:02d}-{clean}")
-                with open(safe, "wb") as f:
-                    f.write(payload)
-                if ctype in NATIVE_CTYPES or ext in NATIVE_EXT:
-                    target = safe
-                elif ext in OFFICE_EXT:
+        # Phase 1: convert attachments and collect print jobs.
+        jobs = []
+        idx = 0
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            fn = dh(part.get_filename() or "")
+            disp = (part.get("Content-Disposition") or "").lower()
+            ctype = (part.get_content_type() or "").lower()
+            if not fn and "attachment" not in disp:
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            if len(payload) > MAX_MB * 1024 * 1024:
+                errors.append(f"{fn or ctype}: exceeds {MAX_MB}MB")
+                continue
+            ext = os.path.splitext(fn)[1].lower()
+            raw = (
+                os.path.basename(fn)
+                if fn
+                else "attachment" + (mimetypes.guess_extension(ctype) or ".bin")
+            )
+            clean = (
+                "".join(c if c.isalnum() or c in "._- " else "_" for c in raw)[
+                    -120:
+                ].strip(". ")
+                or "attachment.bin"
+            )
+            idx += 1
+            safe = os.path.join(wd, f"{idx:02d}-{clean}")
+            with open(safe, "wb") as f:
+                f.write(payload)
+            if ctype in NATIVE_CTYPES or ext in NATIVE_EXT:
+                target = safe
+            elif ext in OFFICE_EXT:
+                try:
                     target = to_pdf(safe, wd)
-                else:
-                    log.info("skip unsupported attachment %s (%s)", fn, ctype)
+                except (TransientError, PermanentError) as exc:
+                    errors.append(f"{fn}: {exc}")
                     continue
-                ok, detail = print_file(target, PRINT_OPTS)
-                (printed if ok else errors).append(fn if ok else f"{fn}: {detail}")
-            # No printable attachment -> print the email body itself (forward-to-print)
-            if not printed and PRINT_BODY:
+            else:
+                log.info("skip unsupported attachment %s (%s)", fn, ctype)
+                continue
+            jobs.append((target, fn))
+        # No printable attachment -> print the email body itself (forward-to-print)
+        if not jobs and not errors and PRINT_BODY:
+            try:
                 body_pdf = render_body(msg, wd)
-                if body_pdf:
-                    ok, detail = print_file(body_pdf, PRINT_OPTS)
-                    (printed if ok else errors).append(
-                        "email body" if ok else f"email body: {detail}"
-                    )
-                else:
-                    errors.append("no printable attachment and no renderable body")
-        except PermanentError as e:
-            errors.append(str(e))
-        except TransientError as e:
-            errors.append(str(e))
+            except (TransientError, PermanentError) as exc:
+                errors.append(str(exc))
+                body_pdf = None
+            if body_pdf:
+                jobs.append((body_pdf, "email body"))
+        elif not jobs and not errors:
+            errors.append("no printable attachment and no renderable body")
+        # Phase 2: submit all converted jobs to CUPS.
+        for path, label in jobs:
+            ok, detail = print_file(path, PRINT_OPTS)
+            printed.append(label if ok else f"{label}: {detail}")
     if printed and not errors:
         move(M, uid, PROCESSED_FOLDER)
         send_reply(msg, frm, "queued", _print_label() + ", ".join(printed))
