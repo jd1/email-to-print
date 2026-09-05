@@ -64,6 +64,11 @@ The script polls that folder once a minute:
 - If there's no printable attachment, it renders the email body itself and
   prints that, so forwarding an email prints the email. That one was an
   afterthought and it's become the most-used feature in the house.
+- Processing is two-phase: conversion runs first for every attachment, then
+  printing runs in a single `lp` pass.  If the printer is temporarily
+  unreachable the message stays in the watch folder and is retried next cycle,
+  up to `RETRY_LIMIT` times (default 3).  At cap the message is rejected with
+  a reply.  Conversion failures reject immediately.
 - Every handled message gets moved out of the watch folder, printed or
   rejected. That move is the entire dedup system. There's no database. If
   the folder has a message in it, it hasn't been dealt with yet. Strictly
@@ -79,7 +84,9 @@ The script polls that folder once a minute:
 Stdlib Python only. The container's external dependencies are `lp`
 (cups-client) and `soffice` (libreoffice-nogui). There's a JSON health
 endpoint on `127.0.0.1:2631/health` if you monitor things; it stays on
-localhost unless you rebind it.
+localhost unless you rebind it.  The endpoint reports `status` (`ok`,
+`starting`, or `degraded`), `pending_messages` (remaining in the watch
+folder), and running totals for printed/rejected/errors.
 
 ## What this fork changes
 
@@ -107,9 +114,10 @@ conversion engine and the deployment:
   print, just logs.)
 - **`.txt` attachments are skipped for now.** That path used the bundled
   LibreOffice; it comes back with the wider Chromium-format work (`.html`,
-  `.md`, `.txt`). Everything deferred from the fuller version of this
-  work (retries, more formats, drained-INBOX mode, ...) is tracked in
-  issue #6.
+  `.md`, `.txt`).  Other reliability features from the fuller version of
+  this work are implemented: bounded retries for transient print failures,
+  two-phase convert-then-print, and `/health` reporting `pending_messages`
+  and degraded status.
 
 Everything else in this README describes the upstream design and still
 applies, except where it mentions `soffice`/LibreOffice inside the poller.

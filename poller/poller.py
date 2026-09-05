@@ -7,6 +7,10 @@ PRINT_TO from allow-listed senders and prints them to a CUPS queue:
   - Office-doc attachments convert via a Gotenberg container
   - if no printable attachment and PRINT_BODY=true, the email body (HTML/text)
     is rendered to PDF by Gotenberg's Chromium route and printed
+Processing is two-phase: convert first, then print.  Transient lp failures
+are retried up to RETRY_LIMIT times (message stays in SOURCE_FOLDER);
+permanent conversion errors reject immediately.  Retry state persists in
+$XDG_STATE_HOME/mailprint/retries.json and is GC'd after 7 days.
 Every processed message is MOVED out of SOURCE_FOLDER (-> PROCESSED_FOLDER on
 success, REJECTED_FOLDER otherwise) which is the idempotency guard.
 Stdlib plus `requests`; external deps are `lp` (CUPS) and a Gotenberg service.
