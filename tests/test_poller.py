@@ -92,27 +92,23 @@ class ConversionTest(unittest.TestCase):
             raise _RequestException("gotenberg is down")
 
         stub["post_handler"] = raise_connection_error
-        self.assertIsNone(
+        with self.assertRaises(poller.TransientError):
             poller.to_pdf(self._write_source("a.docx"), self.output_dir.name)
-        )
 
     def test_office_http_500(self):
         stub["post_handler"] = lambda url, files: _response(500, b"boom")
-        self.assertIsNone(
+        with self.assertRaises(poller.TransientError):
             poller.to_pdf(self._write_source("a.docx"), self.output_dir.name)
-        )
 
     def test_office_http_422(self):
         stub["post_handler"] = lambda url, files: _response(422, b"invalid document")
-        self.assertIsNone(
+        with self.assertRaises(poller.PermanentError):
             poller.to_pdf(self._write_source("a.docx"), self.output_dir.name)
-        )
 
     def test_office_non_pdf_response_body(self):
         stub["post_handler"] = lambda url, files: _response(200, b"not a pdf")
-        self.assertIsNone(
+        with self.assertRaises(poller.PermanentError):
             poller.to_pdf(self._write_source("a.docx"), self.output_dir.name)
-        )
 
     def test_dry_run_skips_http(self):
         poller.DRY_RUN = True
