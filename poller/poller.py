@@ -27,6 +27,14 @@ import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
+class TransientError(Exception):
+    """Temporary failure — safe to retry on the next poll cycle."""
+
+
+class PermanentError(Exception):
+    """Non-retryable failure — move to rejected, do not retry."""
+
+
 def env(k, d=None, req=False):
     v = os.environ.get(k, d)
     if req and not v:
@@ -227,13 +235,21 @@ def print_file(path, opts):
         return True, "skip-print"
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        return r.returncode == 0, (r.stdout + r.stderr).strip()
+        if r.returncode != 0:
+            raise TransientError(f"lp failed (rc={r.returncode}): {r.stdout + r.stderr}".strip())
+        return True, (r.stdout + r.stderr).strip()
+    except TransientError:
+        raise
     except Exception as e:
-        return False, str(e)
+        raise TransientError(f"lp error: {e}") from e
 
 
 def _gotenberg_post(route, filename, content):
-    """POST one file to Gotenberg; return PDF bytes, or None on failure."""
+    """POST one file to Gotenberg; return PDF bytes.
+
+    Raises TransientError on connection/timeout/server errors (safe to retry)
+    and PermanentError on client errors or non-PDF responses.
+    """
     if DRY_RUN:
         log.info(
             "[dry-run] would POST %s%s (%s, %d bytes)",
@@ -251,7 +267,17 @@ def _gotenberg_post(route, filename, content):
         )
     except requests.exceptions.RequestException as error:
         log.error("gotenberg unreachable for %s: %s", filename, error)
-        return None
+        raise TransientError(f"gotenberg unreachable for {filename}: {error}") from error
+    if response.status_code >= 500:
+        log.error(
+            "gotenberg %s server error for %s: HTTP %s",
+            route,
+            filename,
+            response.status_code,
+        )
+        raise TransientError(
+            f"gotenberg {route} server error for {filename}: HTTP {response.status_code}"
+        )
     if response.status_code != 200 or not response.content.startswith(b"%PDF"):
         log.error(
             "gotenberg %s failed for %s: HTTP %s %s",
@@ -260,19 +286,22 @@ def _gotenberg_post(route, filename, content):
             response.status_code,
             response.text[:200],
         )
-        return None
+        raise PermanentError(
+            f"gotenberg {route} failed for {filename}: HTTP {response.status_code}"
+        )
     return response.content
 
 
 def to_pdf(source_path, output_dir):
-    """Office doc -> PDF via Gotenberg's LibreOffice route."""
+    """Office doc -> PDF via Gotenberg's LibreOffice route.
+
+    Propagates TransientError/PermanentError from Gotenberg.
+    """
     with open(source_path, "rb") as source_file:
         source_bytes = source_file.read()
     pdf_bytes = _gotenberg_post(
         "/forms/libreoffice/convert", os.path.basename(source_path), source_bytes
     )
-    if pdf_bytes is None:
-        return None
     output_path = os.path.join(
         output_dir, os.path.splitext(os.path.basename(source_path))[0] + ".pdf"
     )
@@ -282,12 +311,13 @@ def to_pdf(source_path, output_dir):
 
 
 def convert_html(html_bytes, output_dir, name_stem):
-    """HTML -> PDF via Gotenberg's Chromium route (upload must be index.html)."""
+    """HTML -> PDF via Gotenberg's Chromium route (upload must be index.html).
+
+    Propagates TransientError/PermanentError from Gotenberg.
+    """
     pdf_bytes = _gotenberg_post(
         "/forms/chromium/convert/html", "index.html", html_bytes
     )
-    if pdf_bytes is None:
-        return None
     output_path = os.path.join(output_dir, name_stem + ".pdf")
     with open(output_path, "wb") as output_file:
         output_file.write(pdf_bytes)
@@ -324,7 +354,7 @@ def render_body(msg, output_dir):
 
 
 def _print_label():
-    return "Skipped printing: " if SKIP_PRINT else "Printed: "
+    return "Skipped printing: " if SKIP_PRINT else "Queued for printing: "
 
 
 def auth_ok(msg):
@@ -395,62 +425,64 @@ def process(M, uid):
         return
     printed, errors = [], []
     with tempfile.TemporaryDirectory() as wd:
-        idx = 0
-        for part in msg.walk():
-            if part.get_content_maintype() == "multipart":
-                continue
-            fn = dh(part.get_filename() or "")
-            disp = (part.get("Content-Disposition") or "").lower()
-            ctype = (part.get_content_type() or "").lower()
-            if not fn and "attachment" not in disp:
-                continue
-            payload = part.get_payload(decode=True)
-            if not payload:
-                continue
-            if len(payload) > MAX_MB * 1024 * 1024:
-                errors.append(f"{fn or ctype}: exceeds {MAX_MB}MB")
-                continue
-            ext = os.path.splitext(fn)[1].lower()
-            raw = (
-                os.path.basename(fn)
-                if fn
-                else "attachment" + (mimetypes.guess_extension(ctype) or ".bin")
-            )
-            clean = (
-                "".join(c if c.isalnum() or c in "._- " else "_" for c in raw)[
-                    -120:
-                ].strip(". ")
-                or "attachment.bin"
-            )
-            idx += 1
-            safe = os.path.join(wd, f"{idx:02d}-{clean}")
-            with open(safe, "wb") as f:
-                f.write(payload)
-            if ctype in NATIVE_CTYPES or ext in NATIVE_EXT:
-                target = safe
-            elif ext in OFFICE_EXT:
-                target = to_pdf(safe, wd)
-                if not target:
-                    errors.append(f"{fn}: conversion failed")
+        try:
+            idx = 0
+            for part in msg.walk():
+                if part.get_content_maintype() == "multipart":
                     continue
-            else:
-                log.info("skip unsupported attachment %s (%s)", fn, ctype)
-                continue
-            ok, detail = print_file(target, PRINT_OPTS)
-            (printed if ok else errors).append(fn if ok else f"{fn}: {detail}")
-        # No printable attachment -> print the email body itself (forward-to-print)
-        if not printed and PRINT_BODY:
-            body_pdf = render_body(msg, wd)
-            if body_pdf:
-                ok, detail = print_file(body_pdf, PRINT_OPTS)
-                (printed if ok else errors).append(
-                    "email body" if ok else f"email body: {detail}"
+                fn = dh(part.get_filename() or "")
+                disp = (part.get("Content-Disposition") or "").lower()
+                ctype = (part.get_content_type() or "").lower()
+                if not fn and "attachment" not in disp:
+                    continue
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    continue
+                if len(payload) > MAX_MB * 1024 * 1024:
+                    errors.append(f"{fn or ctype}: exceeds {MAX_MB}MB")
+                    continue
+                ext = os.path.splitext(fn)[1].lower()
+                raw = (
+                    os.path.basename(fn)
+                    if fn
+                    else "attachment" + (mimetypes.guess_extension(ctype) or ".bin")
                 )
-            else:
-                errors.append("no printable attachment and no renderable body")
+                clean = (
+                    "".join(c if c.isalnum() or c in "._- " else "_" for c in raw)[
+                        -120:
+                    ].strip(". ")
+                    or "attachment.bin"
+                )
+                idx += 1
+                safe = os.path.join(wd, f"{idx:02d}-{clean}")
+                with open(safe, "wb") as f:
+                    f.write(payload)
+                if ctype in NATIVE_CTYPES or ext in NATIVE_EXT:
+                    target = safe
+                elif ext in OFFICE_EXT:
+                    target = to_pdf(safe, wd)
+                else:
+                    log.info("skip unsupported attachment %s (%s)", fn, ctype)
+                    continue
+                ok, detail = print_file(target, PRINT_OPTS)
+                (printed if ok else errors).append(fn if ok else f"{fn}: {detail}")
+            # No printable attachment -> print the email body itself (forward-to-print)
+            if not printed and PRINT_BODY:
+                body_pdf = render_body(msg, wd)
+                if body_pdf:
+                    ok, detail = print_file(body_pdf, PRINT_OPTS)
+                    (printed if ok else errors).append(
+                        "email body" if ok else f"email body: {detail}"
+                    )
+                else:
+                    errors.append("no printable attachment and no renderable body")
+        except PermanentError as e:
+            errors.append(str(e))
+        except TransientError as e:
+            errors.append(str(e))
     if printed and not errors:
         move(M, uid, PROCESSED_FOLDER)
-        send_reply(msg, frm, "ok", _print_label() + ", ".join(printed))
+        send_reply(msg, frm, "queued", _print_label() + ", ".join(printed))
         _state["printed_total"] += 1
         log.info("DONE printed=%s", printed)
     elif printed:
