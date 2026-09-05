@@ -76,6 +76,7 @@ REQUIRE_AUTH_PASS = env("REQUIRE_AUTH_PASS", "false").lower() == "true"
 TLS_VERIFY = env("TLS_VERIFY", "true").lower() == "true"
 IMAP_SSL = env("IMAP_SSL", "false").lower() == "true"
 REPLY_ON_REJECT = env("REPLY_ON_REJECT", "false").lower() == "true"
+RETRY_LIMIT = int(env("RETRY_LIMIT", "3"))
 PRINT_OPTS = {"sides": env("SIDES", "one-sided"), "media": env("MEDIA", "letter")}
 HEALTH_BIND = env("HEALTH_BIND", "127.0.0.1")
 
@@ -99,6 +100,48 @@ _state = {
     "rejected_total": 0,
     "errors_total": 0,
 }
+
+_RETRY_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", ""), "mailprint")
+_RETRY_FILE = os.path.join(_RETRY_DIR, "retries.json")
+_RETRY_GC_DAYS = 7
+
+
+def _load_retries():
+    try:
+        with open(_RETRY_FILE) as f:
+            return _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return {}
+
+
+def _save_retries(state):
+    os.makedirs(_RETRY_DIR, exist_ok=True, mode=0o700)
+    tmp = _RETRY_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        _json.dump(state, f)
+    os.replace(tmp, _RETRY_FILE)
+
+
+def _retry_key(msg):
+    """Generate a stable retry key from message headers."""
+    mid = msg.get("Message-ID", "")
+    if mid:
+        return mid
+    # Fallback: hash Date + Subject + From
+    parts = [
+        msg.get("Date", ""),
+        msg.get("Subject", ""),
+        msg.get("From", ""),
+    ]
+    import hashlib
+
+    return "h:" + hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+def _gc_retries(state):
+    """Remove retry entries older than _RETRY_GC_DAYS."""
+    cutoff = time.time() - (_RETRY_GC_DAYS * 86400)
+    return {k: v for k, v in state.items() if v.get("ts", 0) >= cutoff}
 
 
 class _Health(BaseHTTPRequestHandler):
@@ -479,9 +522,52 @@ def process(M, uid):
         elif not jobs and not errors:
             errors.append("no printable attachment and no renderable body")
         # Phase 2: submit all converted jobs to CUPS.
-        for path, label in jobs:
-            ok, detail = print_file(path, PRINT_OPTS)
-            printed.append(label if ok else f"{label}: {detail}")
+        try:
+            for path, label in jobs:
+                ok, detail = print_file(path, PRINT_OPTS)
+                printed.append(label if ok else f"{label}: {detail}")
+        except TransientError as exc:
+            retries = _gc_retries(_load_retries())
+            key = _retry_key(msg)
+            entry = retries.get(key, {"count": 0})
+            entry["count"] = entry.get("count", 0) + 1
+            entry["ts"] = time.time()
+            retries[key] = entry
+            _save_retries(retries)
+            if entry["count"] >= RETRY_LIMIT:
+                log.warning(
+                    "RETRY cap uid=%s key=%s attempts=%d",
+                    uid,
+                    key,
+                    entry["count"],
+                )
+                move(M, uid, REJECTED_FOLDER)
+                send_reply(
+                    msg,
+                    frm,
+                    "failed",
+                    f"Print failed after {entry['count']} attempts: {exc}",
+                )
+                _state["rejected_total"] += 1
+                del retries[key]
+                _save_retries(retries)
+            else:
+                log.warning(
+                    "transient uid=%s key=%s attempt=%d/%d: %s",
+                    uid,
+                    key,
+                    entry["count"],
+                    RETRY_LIMIT,
+                    exc,
+                )
+                _state["errors_total"] += 1
+            return
+    # Success — clear any prior retry state for this message.
+    retries = _load_retries()
+    key = _retry_key(msg)
+    if key in retries:
+        del retries[key]
+        _save_retries(retries)
     if printed and not errors:
         move(M, uid, PROCESSED_FOLDER)
         send_reply(msg, frm, "queued", _print_label() + ", ".join(printed))

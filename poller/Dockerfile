@@ -6,8 +6,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && apt-get update && apt-get install -y --no-install-recommends cups-client \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd -m -u 10001 poller
+    && useradd -m -u 10001 poller \
+    && mkdir -p /state && chown poller:poller /state
 COPY poller.py .
-ENV PYTHONUNBUFFERED=1 HOME=/home/poller
+ENV PYTHONUNBUFFERED=1 HOME=/home/poller XDG_STATE_HOME=/state
 USER poller
 CMD ["python3", "poller.py"]
