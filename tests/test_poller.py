@@ -358,5 +358,52 @@ class RetryTest(unittest.TestCase):
         self.assertTrue(key.startswith("h:"))
 
 
+class HealthTest(unittest.TestCase):
+    def test_health_includes_pending_messages(self):
+        import io, json as _json
+
+        poller._state["pending_messages"] = 7
+        handler = poller._Health.__new__(poller._Health)
+        handler.requestline = "GET /health HTTP/1.1"
+        handler.path = "/health"
+        handler.headers = {}
+        handler.wfile = io.BytesIO()
+        handler.request_version = "HTTP/1.1"
+
+        class FakeSock:
+            def __init__(self):
+                self.data = b""
+
+            def sendall(self, d):
+                self.data += d
+
+        handler.request = type("R", (), {"makefile": lambda *a, **kw: io.BytesIO()})()
+        handler.connection = FakeSock()
+        handler.close = lambda: None
+        handler.address = ("127.0.0.1", 0)
+        handler.setup = lambda: None
+
+        # Patch send_response / send_header / end_headers to capture output
+        responses = []
+        headers = {}
+
+        def fake_send_response(code):
+            responses.append(code)
+
+        def fake_send_header(k, v):
+            headers[k] = v
+
+        handler.send_response = fake_send_response
+        handler.send_header = fake_send_header
+        handler.end_headers = lambda: None
+        handler.do_GET()
+
+        body = handler.wfile.getvalue()
+        data = _json.loads(body)
+        self.assertEqual(data["pending_messages"], 7)
+        self.assertIn("status", data)
+        self.assertIn("uptime_s", data)
+
+
 if __name__ == "__main__":
     unittest.main()
