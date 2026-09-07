@@ -200,6 +200,13 @@ class FakeSmtp:
     def quit(self):
         pass
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.quit()
+        return False
+
 
 class RoutingTest(unittest.TestCase):
     def _build_message(self, attachments):
@@ -231,7 +238,7 @@ class RoutingTest(unittest.TestCase):
 
         fake_imap = FakeImap(msg.as_bytes())
         with mock.patch.object(
-            poller, "print_file", return_value=(True, "ok")
+            poller, "print_file", return_value="ok"
         ) as print_mock:
             poller.process(fake_imap, "1")
         self.assertEqual(http_calls, [(LIBREOFFICE_URL, "01-rep.docx")])  # .txt skipped
