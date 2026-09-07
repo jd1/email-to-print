@@ -83,7 +83,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          pr_json=$(gh pr view "${{ inputs.pr_number }}" --json headRefOid,state,headRepository --jq '{sha: .headRefOid, state: .state, fork: .headRepository.isFork}')
+          # -R: this step runs before checkout, so the workspace is not a
+          # git repo yet and gh cannot infer the repo from remotes.
+          pr_json=$(gh pr view "${{ inputs.pr_number }}" -R "${{ github.repository }}" --json headRefOid,state,headRepository --jq '{sha: .headRefOid, state: .state, fork: .headRepository.isFork}')
           echo "$pr_json"
           state=$(echo "$pr_json" | jq -r .state)
           if [ "$state" != "OPEN" ]; then
