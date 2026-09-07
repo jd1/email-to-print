@@ -82,6 +82,7 @@ IMAP_SSL = env("IMAP_SSL", "false").lower() == "true"
 REPLY_ON_REJECT = env("REPLY_ON_REJECT", "false").lower() == "true"
 RETRY_LIMIT = int(env("RETRY_LIMIT", "3"))
 PRINT_OPTS = {"sides": env("SIDES", "one-sided"), "media": env("MEDIA", "letter")}
+LP_TIMEOUT = float(env("LP_TIMEOUT", "120"))
 HEALTH_BIND = env("HEALTH_BIND", "127.0.0.1")
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -106,7 +107,14 @@ _state = {
     "pending_messages": 0,
 }
 
-_RETRY_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", ""), "mailprint")
+def _default_state_dir():
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        return os.path.join(xdg, "mailprint")
+    return os.path.join(os.path.expanduser("~"), ".local", "state", "mailprint")
+
+
+_RETRY_DIR = _default_state_dir()
 _RETRY_FILE = os.path.join(_RETRY_DIR, "retries.json")
 _RETRY_GC_DAYS = 7
 
@@ -124,6 +132,9 @@ def _save_retries(state):
     tmp = _RETRY_FILE + ".tmp"
     with open(tmp, "w") as f:
         _json.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o600)
     os.replace(tmp, _RETRY_FILE)
 
 
@@ -224,7 +235,8 @@ OFFICE_EXT = {
 def dh(s):
     try:
         return str(make_header(decode_header(s or "")))
-    except Exception:
+    except Exception as e:
+        log.debug("header decode failed, using raw value: %s", e)
         return s or ""
 
 
@@ -256,37 +268,47 @@ def imap_connect():
 def ensure_folder(M, name):
     try:
         M.create(name)
-    except Exception:
-        pass
+    except (imaplib.IMAP4.error, OSError) as e:
+        log.debug("ensure folder %s failed (may already exist): %s", name, e)
 
 
 def move(M, uid, dest):
     ensure_folder(M, dest)
     typ, _ = M.uid("MOVE", uid, dest)
+    if typ == "OK":
+        return
+    log.debug("MOVE failed for uid=%s, falling back to COPY+STORE+expunge", uid)
+    typ, _ = M.uid("COPY", uid, dest)
     if typ != "OK":
-        M.uid("COPY", uid, dest)
-        M.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-        M.expunge()
+        raise TransientError(f"COPY uid={uid} to {dest} failed")
+    typ, _ = M.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+    if typ != "OK":
+        raise TransientError(f"STORE \\Deleted uid={uid} failed")
+    M.expunge()
 
 
 def print_file(path, opts):
+    """Submit one PDF to CUPS; return the lp output detail string.
+
+    Raises TransientError when the job was not accepted (safe to retry).
+    """
     cmd = ["lp", "-d", PRINTER]
     for k, v in opts.items():
         cmd += ["-o", f"{k}={v}"]
     cmd += ["--", path]
     log.info("printing %s (%s)", os.path.basename(path), " ".join(cmd))
     if DRY_RUN:
-        return True, "dry-run"
+        return "dry-run"
     if SKIP_PRINT:
         log.info(
             "[skip-print] %s converted, not submitting to CUPS", os.path.basename(path)
         )
-        return True, "skip-print"
+        return "skip-print"
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=LP_TIMEOUT)
         if r.returncode != 0:
             raise TransientError(f"lp failed (rc={r.returncode}): {r.stdout + r.stderr}".strip())
-        return True, (r.stdout + r.stderr).strip()
+        return (r.stdout + r.stderr).strip()
     except TransientError:
         raise
     except Exception as e:
@@ -426,11 +448,10 @@ def send_reply(orig, to_addr, status, detail):
         m["Date"] = formatdate(localtime=True)
         m["Message-ID"] = make_msgid()
         m.set_content(detail)
-        s = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
-        s.starttls(context=_tls_ctx())
-        s.login(IMAP_USER, IMAP_PASS)
-        s.send_message(m)
-        s.quit()
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
+            s.starttls(context=_tls_ctx())
+            s.login(IMAP_USER, IMAP_PASS)
+            s.send_message(m)
     except Exception as e:
         log.warning("confirm reply failed: %s", e)
 
@@ -530,8 +551,8 @@ def process(M, uid):
         # Phase 2: submit all converted jobs to CUPS.
         try:
             for path, label in jobs:
-                ok, detail = print_file(path, PRINT_OPTS)
-                printed.append(label if ok else f"{label}: {detail}")
+                print_file(path, PRINT_OPTS)
+                printed.append(label)
         except TransientError as exc:
             retries = _gc_retries(_load_retries())
             key = _retry_key(msg)
@@ -596,6 +617,12 @@ def process(M, uid):
 
 
 def poll_once(M):
+    # Expire stale retry entries every cycle so the state file cannot grow
+    # unboundedly when no transient failure triggers a GC.
+    retries = _load_retries()
+    cleaned = _gc_retries(retries)
+    if len(cleaned) != len(retries):
+        _save_retries(cleaned)
     M.select(SOURCE_FOLDER)
     # Everything in the dedicated folder is a candidate; process() filters on
     # PRINT_TO. (Header SEARCH missed Cc/X-Original-To-only routing.)
@@ -615,8 +642,8 @@ def poll_once(M):
         _state["pending_messages"] = (
             len(data2[0].split()) if typ2 == "OK" and data2 and data2[0] else 0
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("pending recount failed: %s", e)
     _state["last_poll"] = time.time()
     _state["last_poll_ok"] = True
 
@@ -647,8 +674,8 @@ def main(once=False):
             finally:
                 try:
                     M.logout()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("IMAP logout failed: %s", e)
             ok = True
         except Exception as e:
             _state["last_poll_ok"] = False
