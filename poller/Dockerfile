@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 WORKDIR /app
 # cups-client = `lp` (submits to host cupsd over IPP). Document conversion
 # happens in the Gotenberg container, so no LibreOffice or fonts are needed.
