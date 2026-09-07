@@ -67,8 +67,12 @@ The script polls that folder once a minute:
 - Processing is two-phase: conversion runs first for every attachment, then
   printing runs in a single `lp` pass.  If the printer is temporarily
   unreachable the message stays in the watch folder and is retried next cycle,
-  up to `RETRY_LIMIT` times (default 3).  At cap the message is rejected with
-  a reply.  Conversion failures reject immediately.
+  up to `RETRY_LIMIT` times (default 3, `0` disables retries and rejects
+  immediately).  At cap the message is rejected with a reply.  Conversion
+  failures reject immediately.  Retry counters persist in
+  `$XDG_STATE_HOME/mailprint/retries.json` — `/state` in the container,
+  backed by the `mailprint-state` volume, so a container restart doesn't
+  reset the attempt count.
 - Every handled message gets moved out of the watch folder, printed or
   rejected. That move is the entire dedup system. There's no database. If
   the folder has a message in it, it hasn't been dealt with yet. Strictly
