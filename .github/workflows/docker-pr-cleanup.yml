@@ -1,0 +1,38 @@
+name: docker-pr-cleanup
+
+# Deletes the pr-<number> preview image when a PR is closed (merged or not).
+# Runs in its own workflow (not folded into docker-pr.yml) so the closed
+# event can never satisfy a build job's label condition and trigger a
+# rebuild. Safe to reopen: the `test-image` label survives, and reopening
+# a still-labeled PR rebuilds the image via docker-pr.yml.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete GHCR versions tagged pr-<number>
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ github.event.repository.name }}-preview
+          PR_TAG: pr-${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          PACKAGE=$(echo "$PACKAGE" | tr '[:upper:]' '[:lower:]')
+          mapfile -t ids < <(gh api --paginate "/user/packages/container/${PACKAGE}/versions" \
+            --jq "[.[] | select(.metadata.container.tags[]? == \"${PR_TAG}\") | .id] | unique | .[]")
+          if [ "${#ids[@]}" -eq 0 ] || [ -z "${ids[0]}" ]; then
+            echo "No versions tagged ${PR_TAG}; nothing to delete."
+            exit 0
+          fi
+          for id in "${ids[@]}"; do
+            gh api -X DELETE "/user/packages/container/${PACKAGE}/versions/${id}"
+            echo "Deleted package version ${id} (tag ${PR_TAG})"
+          done

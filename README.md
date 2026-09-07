@@ -131,6 +131,43 @@ applies, except where it mentions `soffice`/LibreOffice inside the poller.
 6. Send yourself a test with `DRY_RUN=true` first. The logs show what would
    have printed. Then flip it off.
 
+## Testing a pull request on your own server
+
+Only PRs I explicitly pick get a Docker image: add the `test-image` label
+to a PR and CI builds `ghcr.io/jd1/email-to-print-preview:pr-<N>` (separate
+package from the release images, so nobody pulling the real image ever sees
+test artifacts). New pushes to a labeled PR rebuild and overwrite the same
+tag; removing the label stops the builds. The image is deleted automatically
+when the PR closes, and reopening a still-labeled PR rebuilds it.
+
+To run a PR image, create an override file (don't commit it) that points at
+the image:
+
+```yaml
+# docker-compose.pr.yml — local only, one per PR you're testing
+services:
+  print-poller:
+    image: ghcr.io/jd1/email-to-print-preview:pr-42
+```
+
+then:
+
+```bash
+docker pull ghcr.io/jd1/email-to-print-preview:pr-42
+docker compose -f docker-compose.yml -f docker-compose.pr.yml up -d
+```
+
+One gotcha, and it's a real one: `docker-compose.yml` bind-mounts
+`./poller/poller.py` over `/app/poller.py:ro`. Leave that in place and you're
+testing your local checkout, not the PR image. Your override has to drop it:
+
+```yaml
+services:
+  print-poller:
+    image: ghcr.io/jd1/email-to-print-preview:pr-42
+    volumes: []
+```
+
 ## The one honest weakness
 
 The allowlist checks the From header, and From headers can be faked.
