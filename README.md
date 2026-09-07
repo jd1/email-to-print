@@ -140,6 +140,10 @@ test artifacts). New pushes to a labeled PR rebuild and overwrite the same
 tag; removing the label stops the builds. The image is deleted automatically
 when the PR closes, and reopening a still-labeled PR rebuilds it.
 
+Fork PRs can't use the label path (their CI token can't push to GHCR), so
+for those run the `docker-pr-build` workflow manually from the Actions tab
+and type in the PR number. Same tag, same cleanup on close.
+
 To run a PR image, create an override file (don't commit it) that points at
 the image:
 
