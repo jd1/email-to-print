@@ -57,9 +57,11 @@ jobs:
         id: meta
         with:
           # Separate package from the release images so consumers of
-          # ghcr.io/<repo> never see test artifacts. type=pr -> pr-<number>.
+          # ghcr.io/<repo> never see test artifacts.
+          # v6 removed type=pr; type=ref,event=pr with default prefix
+          # produces the same pr-<number> tag.
           images: ghcr.io/${{ github.repository }}-preview
-          tags: type=pr
+          tags: type=ref,event=pr
 
       - uses: docker/build-push-action@v6
         with:
