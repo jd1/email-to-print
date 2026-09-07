@@ -16,8 +16,10 @@ services:
   # Bound to localhost only. If you already run Gotenberg (e.g. for
   # Paperless-ngx), delete this service and point GOTENBERG_URL at the
   # existing instance instead.
+  # Pinned to minor 8.36 (patch floats); re-pin on Gotenberg releases.
+  # Endpoint paths used by the poller are identical across v8 minors.
   gotenberg:
-    image: gotenberg/gotenberg:8
+    image: gotenberg/gotenberg:8.36
     container_name: gotenberg
     restart: unless-stopped
     ports:

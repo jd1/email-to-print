@@ -1,4 +1,6 @@
-FROM python:3.14-slim
+# Pinned by digest (multi-arch manifest list for 3.12-slim-bookworm);
+# re-pin with: crane digest python:3.12-slim-bookworm (or check Docker Hub).
+FROM python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
 WORKDIR /app
 # cups-client = `lp` (submits to host cupsd over IPP). Document conversion
 # happens in the Gotenberg container, so no LibreOffice or fonts are needed.
@@ -11,4 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY poller.py .
 ENV PYTHONUNBUFFERED=1 HOME=/home/poller XDG_STATE_HOME=/state
 USER poller
+# Port must match HEALTH_PORT (default 2631). No curl in slim images,
+# so the check uses stdlib urllib instead.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s \
+  CMD python3 -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:2631/health', timeout=4).status == 200 else 1)"
 CMD ["python3", "poller.py"]
