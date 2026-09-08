@@ -107,6 +107,7 @@ _state = {
     "rejected_total": 0,
     "errors_total": 0,
     "pending_messages": 0,
+    "gotenberg_version": None,
 }
 
 def _default_state_dir():
@@ -190,6 +191,7 @@ class _Health(BaseHTTPRequestHandler):
                 "rejected_total": _state["rejected_total"],
                 "errors_total": _state["errors_total"],
                 "pending_messages": _state["pending_messages"],
+                "gotenberg_version": _state["gotenberg_version"],
                 "uptime_s": int(time.time() - _state["started"]),
             }
         ).encode()
@@ -205,6 +207,32 @@ def _start_health():
         HTTPServer((HEALTH_BIND, HEALTH_PORT), _Health).serve_forever()
     except Exception as e:
         log.warning("health server failed: %s", e)
+
+
+def _check_gotenberg_version():
+    """Record the Gotenberg server version once at startup.
+
+    The poller only uses convert paths that are identical across v8
+    minors, but a major-version jump may change options — logging the
+    server version up front (including on DRY_RUN passes, which skip
+    all conversions) makes that visible before anything prints.
+    Never fatal: an unreachable Gotenberg just leaves the version unset.
+    """
+    try:
+        response = requests.get(GOTENBERG_URL + "/version", timeout=10)
+    except requests.exceptions.RequestException as e:
+        log.warning("could not read Gotenberg version: %s", e)
+        return
+    if response.status_code != 200:
+        log.warning("Gotenberg /version returned HTTP %s", response.status_code)
+        return
+    version = response.text.strip()
+    major = version.split(".")[0] if version[:1].isdigit() else ""
+    if not major:
+        log.warning("unparseable Gotenberg version: %r", response.text[:50])
+        return
+    _state["gotenberg_version"] = version
+    log.info("Gotenberg server version %s (major %s)", version, major)
 
 
 NATIVE_CTYPES = {
@@ -750,6 +778,7 @@ def main(once=False):
         log.warning("ALLOWED_SENDERS empty -> fail-closed")
     threading.Thread(target=_start_health, daemon=True).start()
     log.info("health endpoint on :%d/health", HEALTH_PORT)
+    _check_gotenberg_version()
     M = imap_connect()
     try:
         _require_uidplus(M)
