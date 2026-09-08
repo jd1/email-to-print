@@ -5,6 +5,7 @@ Watches SOURCE_FOLDER (a Proton-via-Bridge mailbox) for messages addressed to
 PRINT_TO from allow-listed senders and prints them to a CUPS queue:
   - PDF/image attachments print natively
   - Office-doc attachments convert via a Gotenberg container
+  - HTML/markdown/text attachments render via Gotenberg's Chromium route
   - if no printable attachment and PRINT_BODY=true, the email body (HTML/text)
     is rendered to PDF by Gotenberg's Chromium route and printed
 Processing is two-phase: convert first, then print.  Transient lp failures
@@ -28,6 +29,7 @@ from email.message import EmailMessage
 import imaplib, smtplib, threading, json as _json
 import html as _html
 import requests
+import markdown
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
@@ -215,8 +217,8 @@ NATIVE_CTYPES = {
     "image/tiff",
 }
 NATIVE_EXT = {".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
-# .txt used to go through LibreOffice; it is skipped until the
-# Chromium-format work lands (issue #6).
+# .txt used to go through LibreOffice; it now renders via Chromium
+# (see MARKUP_EXT below).
 OFFICE_EXT = {
     ".doc",
     ".docx",
@@ -230,6 +232,13 @@ OFFICE_EXT = {
     ".odp",
     ".csv",
 }
+# Attachments rendered to PDF through Gotenberg's Chromium route.
+MARKUP_EXT = {".html", ".htm", ".md", ".markdown", ".txt"}
+# Minimal print stylesheet wrapping converted markup and plain-text bodies.
+PRINT_CSS = (
+    "@page{margin:18mm} body{font-family:sans-serif;font-size:11pt;"
+    "word-wrap:break-word} pre{white-space:pre-wrap;font-size:10pt}"
+)
 
 
 def dh(s):
@@ -381,6 +390,33 @@ def to_pdf(source_path, output_dir):
     return output_path
 
 
+def convert_markup(source_path, output_dir, ext):
+    """HTML/markdown/text file -> PDF via Gotenberg's Chromium route.
+
+    `.html`/`.htm` go through as-is; `.md`/`.markdown` render via
+    python-markdown; anything else (`.txt`) is wrapped in `<pre>` with
+    print CSS. Propagates TransientError/PermanentError from Gotenberg.
+    """
+    if ext in (".html", ".htm"):
+        with open(source_path, "rb") as source_file:
+            page_bytes = source_file.read()
+    else:
+        with open(source_path, encoding="utf-8", errors="replace") as source_file:
+            text = source_file.read()
+        if ext in (".md", ".markdown"):
+            inner = markdown.markdown(text, extensions=["extra"])
+        else:
+            inner = "<pre>" + _html.escape(text) + "</pre>"
+        page_bytes = (
+            "<html><head><meta charset='utf-8'><style>"
+            + PRINT_CSS
+            + "</style></head><body>"
+            + inner
+            + "</body></html>"
+        ).encode()
+    return convert_html(page_bytes, output_dir, os.path.splitext(os.path.basename(source_path))[0] or "doc")
+
+
 def convert_html(html_bytes, output_dir, name_stem):
     """HTML -> PDF via Gotenberg's Chromium route (upload must be index.html).
 
@@ -530,6 +566,12 @@ def process(M, uid):
             elif ext in OFFICE_EXT:
                 try:
                     target = to_pdf(safe, wd)
+                except (TransientError, PermanentError) as exc:
+                    errors.append(f"{fn}: {exc}")
+                    continue
+            elif ext in MARKUP_EXT:
+                try:
+                    target = convert_markup(safe, wd, ext)
                 except (TransientError, PermanentError) as exc:
                     errors.append(f"{fn}: {exc}")
                     continue

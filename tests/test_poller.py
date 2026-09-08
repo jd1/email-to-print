@@ -222,7 +222,7 @@ class RoutingTest(unittest.TestCase):
             )
         return msg
 
-    def test_docx_converted_txt_skipped(self):
+    def test_docx_and_txt_converted(self):
         stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
         http_calls[:] = []
         msg = self._build_message(
@@ -241,8 +241,11 @@ class RoutingTest(unittest.TestCase):
             poller, "print_file", return_value="ok"
         ) as print_mock:
             poller.process(fake_imap, "1")
-        self.assertEqual(http_calls, [(LIBREOFFICE_URL, "01-rep.docx")])  # .txt skipped
-        self.assertEqual(print_mock.call_count, 1)  # only converted docx
+        self.assertEqual(
+            http_calls,
+            [(LIBREOFFICE_URL, "01-rep.docx"), (CHROMIUM_URL, "index.html")],
+        )
+        self.assertEqual(print_mock.call_count, 2)
         self.assertEqual(fake_imap.moved_uids, [("1", poller.PROCESSED_FOLDER)])
 
     def test_skip_print_converts_and_skips_lp(self):
@@ -276,9 +279,57 @@ class RoutingTest(unittest.TestCase):
 
 class ExtensionTest(unittest.TestCase):
     def test_office_extensions(self):
-        # .txt used to be converted by the bundled LibreOffice; skipped now.
+        # .txt renders via the Chromium route now, not LibreOffice.
         self.assertNotIn(".txt", poller.OFFICE_EXT)
         self.assertIn(".csv", poller.OFFICE_EXT)
+
+    def test_markup_extensions(self):
+        for ext in (".html", ".htm", ".md", ".markdown", ".txt"):
+            self.assertIn(ext, poller.MARKUP_EXT)
+
+
+class MarkupTest(unittest.TestCase):
+    def setUp(self):
+        self.output_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.output_dir.cleanup)
+        stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
+        http_calls[:] = []
+
+    def _write_source(self, filename, data):
+        source_path = os.path.join(self.output_dir.name, filename)
+        with open(source_path, "wb") as source_file:
+            source_file.write(data)
+        return source_path
+
+    def test_html_goes_through_as_is(self):
+        body = b"<html><body><h1>Hi</h1></body></html>"
+        output_path = poller.convert_markup(
+            self._write_source("page.html", body), self.output_dir.name, ".html"
+        )
+        self.assertTrue(output_path.endswith("page.pdf"))
+        self.assertEqual(http_calls, [(CHROMIUM_URL, "index.html")])
+        self.assertEqual(last_upload["content"], body)
+
+    def test_markdown_renders_to_html(self):
+        output_path = poller.convert_markup(
+            self._write_source("notes.md", b"# Title\n\nsome *text*"),
+            self.output_dir.name,
+            ".md",
+        )
+        self.assertTrue(output_path.endswith("notes.pdf"))
+        self.assertEqual(http_calls, [(CHROMIUM_URL, "index.html")])
+        self.assertIn(b"<h1>Title</h1>", last_upload["content"])
+
+    def test_txt_wrapped_in_pre_escaped(self):
+        output_path = poller.convert_markup(
+            self._write_source("notes.txt", b"a <b> & c"),
+            self.output_dir.name,
+            ".txt",
+        )
+        self.assertTrue(output_path.endswith("notes.pdf"))
+        self.assertEqual(http_calls, [(CHROMIUM_URL, "index.html")])
+        self.assertIn(b"<pre>a &lt;b&gt; &amp; c</pre>", last_upload["content"])
+        self.assertIn(b"<style>", last_upload["content"])
 
 
 class RetryTest(unittest.TestCase):
