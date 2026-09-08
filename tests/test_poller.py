@@ -32,7 +32,7 @@ _fake_requests_module.exceptions = _exceptions_module
 
 http_calls = []
 last_upload = {"filename": None, "content": None}
-stub = {"post_handler": None}
+stub = {"post_handler": None, "get_handler": None}
 
 
 def _fake_post(url, files=None, timeout=None):
@@ -43,7 +43,13 @@ def _fake_post(url, files=None, timeout=None):
     return stub["post_handler"](url, files)
 
 
+def _fake_get(url, timeout=None):
+    http_calls.append((url, None))
+    return stub["get_handler"](url)
+
+
 _fake_requests_module.post = _fake_post
+_fake_requests_module.get = _fake_get
 sys.modules.setdefault("requests", _fake_requests_module)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "poller"))
@@ -518,6 +524,42 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(fake_imap.selected, poller.SOURCE_FOLDER)
         self.assertEqual(fake_imap.expunged, ["1"])
         self.assertEqual(poller._state["pending_messages"], 0)
+
+
+class VersionTest(unittest.TestCase):
+    def setUp(self):
+        orig_version = poller._state["gotenberg_version"]
+        self.addCleanup(
+            lambda: poller._state.__setitem__("gotenberg_version", orig_version)
+        )
+        poller._state["gotenberg_version"] = None
+        http_calls[:] = []
+
+    def test_version_recorded(self):
+        stub["get_handler"] = lambda url: _response(200, b"8.36.0")
+        poller._check_gotenberg_version()
+        self.assertEqual(poller._state["gotenberg_version"], "8.36.0")
+        self.assertEqual(
+            http_calls, [("http://gotenberg.test:3000/version", None)]
+        )
+
+    def test_version_unreachable_leaves_unset(self):
+        def raise_connection_error(url):
+            raise _RequestException("gotenberg is down")
+
+        stub["get_handler"] = raise_connection_error
+        poller._check_gotenberg_version()  # must not raise
+        self.assertIsNone(poller._state["gotenberg_version"])
+
+    def test_version_bad_status_leaves_unset(self):
+        stub["get_handler"] = lambda url: _response(500, b"boom")
+        poller._check_gotenberg_version()
+        self.assertIsNone(poller._state["gotenberg_version"])
+
+    def test_version_unparseable_leaves_unset(self):
+        stub["get_handler"] = lambda url: _response(200, b"not-a-version")
+        poller._check_gotenberg_version()
+        self.assertIsNone(poller._state["gotenberg_version"])
 
 
 class HealthTest(unittest.TestCase):

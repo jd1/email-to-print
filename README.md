@@ -98,8 +98,11 @@ folder), and running totals for printed/rejected/errors.
 The mail handling is all upstream behavior; this fork only replaces the
 conversion engine and the deployment:
 
-- **Conversion runs in a Gotenberg container** (`gotenberg/gotenberg:8`),
-  not a bundled LibreOffice. Office documents go to
+- **Conversion runs in a Gotenberg container** (pinned to minor `8.36` in
+  `docker-compose.yml`; patch floats), not a bundled LibreOffice. The
+  poller logs the server's `/version` at startup — including on `DRY_RUN`
+  passes — so a major-version jump shows up before anything prints. Office
+  documents go to
   `POST /forms/libreoffice/convert`; mail with no printable attachment is
   rendered through `POST /forms/chromium/convert/html` (the upload must be
   named `index.html`, as the route requires). The same Chromium route also
