@@ -317,11 +317,17 @@ HDR_FIELDS = (
 )
 
 
+def _uid_str(uid):
+    """Decode a UID from IMAP responses (bytes from SEARCH) for logging."""
+    return uid.decode("ascii", errors="replace") if isinstance(uid, bytes) else str(uid)
+
+
 def fetch_headers(M, uid):
     """Fetch only routing headers; BODY.PEEK leaves \\Seen unset."""
     fields = " ".join(HDR_FIELDS)
     typ, data = M.uid("FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (%s)])" % fields)
     if typ != "OK" or not data or not data[0]:
+        log.warning("header fetch failed uid=%s type=%s (skipped, will retry)", _uid_str(uid), typ)
         return None
     return email.message_from_bytes(data[0][1])
 
@@ -330,10 +336,10 @@ def delete_uid(M, uid):
     """Mark \\Deleted and expunge just this UID (requires UIDPLUS)."""
     typ, _ = M.uid("STORE", uid, "+FLAGS.SILENT", r"(\Deleted)")
     if typ != "OK":
-        raise TransientError(f"STORE \\Deleted uid={uid} failed")
+        raise TransientError(f"STORE \\Deleted uid={_uid_str(uid)} failed")
     typ, _ = M.uid("EXPUNGE", uid)
     if typ != "OK":
-        raise TransientError(f"EXPUNGE uid={uid} failed")
+        raise TransientError(f"EXPUNGE uid={_uid_str(uid)} failed")
 
 
 def stranger_drop(M, uid, msg, why):
