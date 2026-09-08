@@ -101,9 +101,11 @@ conversion engine and the deployment:
   not a bundled LibreOffice. Office documents go to
   `POST /forms/libreoffice/convert`; mail with no printable attachment is
   rendered through `POST /forms/chromium/convert/html` (the upload must be
-  named `index.html`, as the route requires). The poller image drops the
-  ~700MB LibreOffice install — its only added dependency is `requests`,
-  pinned in `poller/requirements.txt`.
+  named `index.html`, as the route requires). The same Chromium route also
+  handles `.html`/`.htm` attachments as-is, `.md`/`.markdown` rendered via
+  python-markdown, and `.txt` wrapped in `<pre>` with print CSS. The poller
+  image drops the ~700MB LibreOffice install — its only added dependencies
+  are `requests` and `Markdown`, pinned in `poller/requirements.txt`.
 - **`docker-compose.yml` starts Gotenberg too**, bound to
   `127.0.0.1:3000`. If you already run Gotenberg (e.g. for
   Paperless-ngx), delete that service and point `GOTENBERG_URL` at the
@@ -116,12 +118,11 @@ conversion engine and the deployment:
   paper. Confirmations say "Skipped printing: ..." instead of
   "Printed: ...". (`DRY_RUN=true` is the other extreme: no conversion, no
   print, just logs.)
-- **`.txt` attachments are skipped for now.** That path used the bundled
-  LibreOffice; it comes back with the wider Chromium-format work (`.html`,
-  `.md`, `.txt`).  Other reliability features from the fuller version of
-  this work are implemented: bounded retries for transient print failures,
-  two-phase convert-then-print, and `/health` reporting `pending_messages`
-  and degraded status.
+- **Chromium-format attachments are supported** (`.html`, `.htm`, `.md`,
+  `.markdown`, `.txt`), closing out the deferred format work from issue #6.
+  Reliability features from the fuller version of this work are implemented:
+  bounded retries for transient print failures, two-phase convert-then-print,
+  and `/health` reporting `pending_messages` and degraded status.
 
 Everything else in this README describes the upstream design and still
 applies, except where it mentions `soffice`/LibreOffice inside the poller.
