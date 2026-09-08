@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """print-poller: email-to-print bridge.
 
-Watches SOURCE_FOLDER (a Proton-via-Bridge mailbox) for messages addressed to
-PRINT_TO from allow-listed senders and prints them to a CUPS queue:
-  - PDF/image attachments print natively
-  - Office-doc attachments convert via a Gotenberg container
-  - HTML/markdown/text attachments render via Gotenberg's Chromium route
-  - if no printable attachment and PRINT_BODY=true, the email body (HTML/text)
-    is rendered to PDF by Gotenberg's Chromium route and printed
-Processing is two-phase: convert first, then print.  Transient lp failures
-are retried up to RETRY_LIMIT times (message stays in SOURCE_FOLDER);
-permanent conversion errors reject immediately.  Retry state persists in
+Watches the INBOX of a dedicated print account and drains it every cycle:
+  - headers are fetched first; anything not addressed to PRINT_TO or from
+    a non-allow-listed sender is logged (From/date/Subject) and expunged
+    without ever downloading the body and without a reply;
+  - allow-listed-looking senders failing SPF/DKIM (when REQUIRE_AUTH_PASS
+    is on) also vanish silently;
+  - everyone else gets their attachments printed: PDF/images straight to
+    lp, Office documents via Gotenberg's LibreOffice route, HTML/markdown/
+    text via its Chromium route, and body-only mail prints the rendered
+    email body when PRINT_BODY=true.
+Processing is two-phase: convert first, then print.  Transient failures
+leave the message untouched for the next cycle, up to RETRY_LIMIT times;
+terminal outcomes (printed, failed, dropped) are expunged by UID, so the
+mailbox ends up empty.  Retry state persists in
 $XDG_STATE_HOME/mailprint/retries.json and is GC'd after 7 days.
-Every processed message is MOVED out of SOURCE_FOLDER (-> PROCESSED_FOLDER on
-success, REJECTED_FOLDER otherwise) which is the idempotency guard.
-Stdlib plus `requests`; external deps are `lp` (CUPS) and a Gotenberg service.
-Fail-closed on the allow-list.
+Requires a UIDPLUS-capable IMAP server (UID EXPUNGE).
+Stdlib plus `requests`/`markdown`; external deps are `lp` (CUPS) and a
+Gotenberg service.  Fail-closed on the allow-list.
 SKIP_PRINT=true runs the real Gotenberg conversion but skips `lp`
 (conversion test); DRY_RUN=true does neither.
 Run with --once for a single poll cycle (exit 0 on success, 1 on failure);
@@ -38,7 +41,7 @@ class TransientError(Exception):
 
 
 class PermanentError(Exception):
-    """Non-retryable failure — move to rejected, do not retry."""
+    """Non-retryable failure — expunge, do not retry."""
 
 
 def env(k, d=None, req=False):
@@ -70,8 +73,6 @@ PRINTER = env("PRINTER", req=True)
 CUPS_SERVER = env("CUPS_SERVER", "127.0.0.1:631")
 GOTENBERG_URL = env("GOTENBERG_URL", "http://127.0.0.1:3000").rstrip("/")
 GOTENBERG_TIMEOUT = float(env("GOTENBERG_TIMEOUT", "120"))
-PROCESSED_FOLDER = env("PROCESSED_FOLDER", "Folders/Printed")
-REJECTED_FOLDER = env("REJECTED_FOLDER", "Folders/Print-Rejected")
 POLL_INTERVAL = int(env("POLL_INTERVAL", "60"))
 MAX_MB = float(env("MAX_ATTACH_MB", "25"))
 CONFIRM_REPLY = env("CONFIRM_REPLY", "true").lower() == "true"
@@ -81,7 +82,6 @@ SKIP_PRINT = env("SKIP_PRINT", "false").lower() == "true"
 REQUIRE_AUTH_PASS = env("REQUIRE_AUTH_PASS", "false").lower() == "true"
 TLS_VERIFY = env("TLS_VERIFY", "true").lower() == "true"
 IMAP_SSL = env("IMAP_SSL", "false").lower() == "true"
-REPLY_ON_REJECT = env("REPLY_ON_REJECT", "false").lower() == "true"
 RETRY_LIMIT = int(env("RETRY_LIMIT", "3"))
 PRINT_OPTS = {"sides": env("SIDES", "one-sided"), "media": env("MEDIA", "letter")}
 LP_TIMEOUT = float(env("LP_TIMEOUT", "120"))
@@ -274,26 +274,76 @@ def imap_connect():
     return M
 
 
-def ensure_folder(M, name):
-    try:
-        M.create(name)
-    except (imaplib.IMAP4.error, OSError) as e:
-        log.debug("ensure folder %s failed (may already exist): %s", name, e)
+# Headers needed to route a message before its body is worth downloading.
+HDR_FIELDS = (
+    "From",
+    "To",
+    "Cc",
+    "Delivered-To",
+    "X-Original-To",
+    "X-Forwarded-To",
+    "Subject",
+    "Date",
+    "Message-ID",
+    "Authentication-Results",
+)
 
 
-def move(M, uid, dest):
-    ensure_folder(M, dest)
-    typ, _ = M.uid("MOVE", uid, dest)
-    if typ == "OK":
-        return
-    log.debug("MOVE failed for uid=%s, falling back to COPY+STORE+expunge", uid)
-    typ, _ = M.uid("COPY", uid, dest)
-    if typ != "OK":
-        raise TransientError(f"COPY uid={uid} to {dest} failed")
-    typ, _ = M.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+def fetch_headers(M, uid):
+    """Fetch only routing headers; BODY.PEEK leaves \\Seen unset."""
+    fields = " ".join(HDR_FIELDS)
+    typ, data = M.uid("FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (%s)])" % fields)
+    if typ != "OK" or not data or not data[0]:
+        return None
+    return email.message_from_bytes(data[0][1])
+
+
+def delete_uid(M, uid):
+    """Mark \\Deleted and expunge just this UID (requires UIDPLUS)."""
+    typ, _ = M.uid("STORE", uid, "+FLAGS.SILENT", r"(\Deleted)")
     if typ != "OK":
         raise TransientError(f"STORE \\Deleted uid={uid} failed")
-    M.expunge()
+    typ, _ = M.uid("EXPUNGE", uid)
+    if typ != "OK":
+        raise TransientError(f"EXPUNGE uid={uid} failed")
+
+
+def stranger_drop(M, uid, msg, why):
+    """Log and silently expunge a message that must never print."""
+    log.warning(
+        "DROP %s: from=%s date=%s subj=%r",
+        why,
+        parseaddr(msg.get("From", ""))[1],
+        msg.get("Date", ""),
+        dh(msg.get("Subject", "(no subject)")),
+    )
+    delete_uid(M, uid)
+    _state["rejected_total"] += 1
+
+
+def _server_capabilities(M):
+    try:
+        typ, data = M.capability()
+    except Exception as e:
+        log.debug("capability check failed: %s", e)
+        return set()
+    if typ != "OK" or not data:
+        return set()
+    caps = set()
+    for chunk in data:
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode("ascii", errors="replace")
+        caps.update(str(chunk).upper().split())
+    return caps
+
+
+def _require_uidplus(M):
+    if "UIDPLUS" not in _server_capabilities(M):
+        logging.critical(
+            "IMAP server does not advertise UIDPLUS (UID EXPUNGE); "
+            "the empty-mailbox guarantee needs it. Refusing to start."
+        )
+        sys.exit(2)
 
 
 def print_file(path, opts):
@@ -493,39 +543,30 @@ def send_reply(orig, to_addr, status, detail):
 
 
 def process(M, uid):
+    # Phase 0: headers only — strangers never cost more than a few KB.
+    hdr = fetch_headers(M, uid)
+    if hdr is None:
+        return
+    if PRINT_TO not in addrs(
+        hdr, "To", "Cc", "Delivered-To", "X-Original-To", "X-Forwarded-To"
+    ):
+        stranger_drop(M, uid, hdr, f"not addressed to {PRINT_TO}")
+        return
+    frm = parseaddr(hdr.get("From", ""))[1].lower()
+    if (not ALLOWED) or (frm not in ALLOWED):
+        stranger_drop(M, uid, hdr, "sender not allowed")
+        return
+    if not auth_ok(hdr):
+        log.warning("REJECT failed SPF/DKIM (silent): %s", frm)
+        delete_uid(M, uid)
+        _state["rejected_total"] += 1
+        return
+    subj = dh(hdr.get("Subject", "(no subject)"))
+    log.info("candidate from=%s subj=%r", frm, subj)
     typ, data = M.uid("FETCH", uid, "(RFC822)")
     if typ != "OK" or not data or not data[0]:
         return
     msg = email.message_from_bytes(data[0][1])
-    if PRINT_TO not in addrs(
-        msg, "To", "Cc", "Delivered-To", "X-Original-To", "X-Forwarded-To"
-    ):
-        log.warning(
-            "REJECT not addressed to %s (in %s anyway)", PRINT_TO, SOURCE_FOLDER
-        )
-        move(M, uid, REJECTED_FOLDER)
-        _state["rejected_total"] += 1
-        return
-    frm = parseaddr(msg.get("From", ""))[1].lower()
-    subj = dh(msg.get("Subject", "(no subject)"))
-    log.info("candidate from=%s subj=%r", frm, subj)
-    if (not ALLOWED) or (frm not in ALLOWED):
-        log.warning("REJECT sender not allowed: %s", frm)
-        move(M, uid, REJECTED_FOLDER)
-        if REPLY_ON_REJECT:
-            send_reply(
-                msg,
-                frm,
-                "rejected (sender not allowed)",
-                "Your address is not on the print allow-list.",
-            )
-        _state["rejected_total"] += 1
-        return
-    if not auth_ok(msg):
-        log.warning("REJECT failed SPF/DKIM: %s", frm)
-        move(M, uid, REJECTED_FOLDER)
-        _state["rejected_total"] += 1
-        return
     printed, errors = [], []
     with tempfile.TemporaryDirectory() as wd:
         # Phase 1: convert attachments and collect print jobs.
@@ -610,7 +651,7 @@ def process(M, uid):
                     key,
                     entry["count"],
                 )
-                move(M, uid, REJECTED_FOLDER)
+                delete_uid(M, uid)
                 send_reply(
                     msg,
                     frm,
@@ -637,13 +678,15 @@ def process(M, uid):
     if key in retries:
         del retries[key]
         _save_retries(retries)
+    # Unconditional exit: every terminal outcome expunges the message, so
+    # the mailbox drains and a failed reply can never cause a reprint loop.
     if printed and not errors:
-        move(M, uid, PROCESSED_FOLDER)
+        delete_uid(M, uid)
         send_reply(msg, frm, "queued", _print_label() + ", ".join(printed))
         _state["printed_total"] += 1
         log.info("DONE printed=%s", printed)
     elif printed:
-        move(M, uid, PROCESSED_FOLDER)
+        delete_uid(M, uid)
         send_reply(
             msg,
             frm,
@@ -652,7 +695,7 @@ def process(M, uid):
         )
         log.warning("PARTIAL printed=%s errors=%s", printed, errors)
     else:
-        move(M, uid, REJECTED_FOLDER)
+        delete_uid(M, uid)
         send_reply(msg, frm, "failed", "Nothing could be printed. " + "; ".join(errors))
         _state["rejected_total"] += 1
         log.warning("NO-PRINT errors=%s", errors)
@@ -707,6 +750,14 @@ def main(once=False):
         log.warning("ALLOWED_SENDERS empty -> fail-closed")
     threading.Thread(target=_start_health, daemon=True).start()
     log.info("health endpoint on :%d/health", HEALTH_PORT)
+    M = imap_connect()
+    try:
+        _require_uidplus(M)
+    finally:
+        try:
+            M.logout()
+        except Exception as e:
+            log.debug("IMAP logout failed: %s", e)
     while True:
         ok = False
         try:

@@ -48,16 +48,18 @@ the bridge entirely and point straight at your provider. The compose pins
 the bridge image to the exact digest running in my house; it's a community
 image, so read the comment above it before trusting it with credentials.
 
-A filter at the mail provider moves anything addressed to the print alias
-into its own folder, so the script never touches the real inbox. That filter
-is doing more work than any of my code.
+The print address is a dedicated account, so there is no filter and no
+separate folder: the script watches the account's `INBOX` and drains it
+every cycle. Every handled message is expunged by UID and the mailbox
+ends up empty, which is the entire dedup system. There's no database.
 
-The script polls that folder once a minute:
+The script polls that inbox once a minute:
 
-- If the sender isn't on `ALLOWED_SENDERS`, the message moves to a rejected
-  folder and the sender gets a reply saying so. An empty allowlist means
-  nothing prints. I made it fail closed after about ten seconds of imagining
-  what happens if it didn't.
+- Headers are fetched first. If the mail isn't addressed to `PRINT_TO` or
+  the sender isn't on `ALLOWED_SENDERS`, the message is logged
+  (From/date/Subject) and expunged without ever downloading the body and
+  without a reply. An empty allowlist means nothing prints. I made it fail
+  closed after about ten seconds of imagining what happens if it didn't.
 - PDFs and images go straight to `lp`. Word docs and spreadsheets get
   converted to PDF first with headless LibreOffice, which works maybe 95% of
   the time and produces something ugly but printable the rest.
@@ -73,16 +75,15 @@ The script polls that folder once a minute:
   `$XDG_STATE_HOME/mailprint/retries.json` — `/state` in the container,
   backed by the `mailprint-state` volume, so a container restart doesn't
   reset the attempt count.
-- Every handled message gets moved out of the watch folder, printed or
-  rejected. That move is the entire dedup system. There's no database. If
-  the folder has a message in it, it hasn't been dealt with yet. Strictly
-  speaking that's at-least-once: if the process died between printing and
-  moving, you'd get a duplicate. I expected to regret this and haven't.
+- Strictly speaking that's at-least-once: if the process died between
+  printing and expunging, you'd get a duplicate. I expected to regret this
+  and haven't.
 - Allowlisted senders get a confirmation email whether the print worked or
-  not, unless you enable auth checks and the message fails them. It sounds
+  not, unless you enable auth checks and the message fails them — those
+  vanish silently along with the strangers. It sounds
   like a gimmick until someone prints from the grocery
-  store and wants to know if it worked. Rejected strangers get silence by
-  default, on purpose. Their From address is unverified, and replying to
+  store and wants to know if it worked. Rejected strangers get silence,
+  always. Their From address is unverified, and replying to
   spoofed mail is how you become a backscatter cannon.
 
 Stdlib Python only. The container's external dependencies are `lp`
@@ -134,8 +135,9 @@ applies, except where it mentions `soffice`/LibreOffice inside the poller.
    doesn't work, nothing below will either.
 2. `cp .env.example .env` and fill it in. `ALLOWED_SENDERS` and `PRINT_TO`
    are the two that matter.
-3. Create the filter at your mail provider that routes `PRINT_TO` mail into
-   a dedicated folder, and set `SOURCE_FOLDER` to it.
+3. Point `IMAP_USER` at a dedicated print account (`PRINT_TO` is usually
+   the same address). The poller drains its `INBOX` directly — no filter
+   or folder setup needed. Your IMAP server must advertise UIDPLUS.
 4. If you're on Proton: `docker compose run --rm protonmail-bridge init`
    once to log in interactively. Anyone else: delete that service from the
    compose file and point `IMAP_HOST`/`IMAP_PORT` at your provider.
