@@ -504,6 +504,26 @@ class DrainTest(unittest.TestCase):
         # UIDPLUS advertised — no exit.
         poller._require_uidplus(FakeImap(b""))
 
+    def test_header_fetch_failure_logged_and_skipped(self):
+        msg = self._build_message()
+        fake_imap = FakeImap(msg.as_bytes())
+        orig_uid = fake_imap.uid
+
+        def failing_fetch(command, *args):
+            if command == "FETCH" and "HEADER" in args[1]:
+                return "NO", [b"fetch failed"]
+            return orig_uid(command, *args)
+
+        with mock.patch.object(fake_imap, "uid", side_effect=failing_fetch):
+            with self.assertLogs(poller.log, level="WARNING") as captured:
+                poller.process(fake_imap, "1")
+        self.assertTrue(
+            any("header fetch failed" in line for line in captured.output),
+            captured.output,
+        )
+        self.assertEqual(fake_imap.fetched_full, [])
+        self.assertEqual(fake_imap.expunged, [])
+
     def test_poll_empties_mailbox(self):
         retries_dir = tempfile.mkdtemp()
         orig_retry_file = poller._RETRY_FILE
