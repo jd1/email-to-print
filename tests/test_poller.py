@@ -166,19 +166,51 @@ class BodyTest(unittest.TestCase):
 
 
 class FakeImap:
-    def __init__(self, raw_bytes):
+    def __init__(self, raw_bytes, capabilities=(b"IMAP4rev1", b"UIDPLUS")):
         self.raw_bytes = raw_bytes
-        self.moved_uids = []
+        self.capabilities = list(capabilities)
+        self.selected = None
+        self.fetched_headers = []
+        self.fetched_full = []
+        self.deleted = set()
+        self.expunged = []
 
-    def create(self, folder_name):
+    def _key(self, uid):
+        return uid.decode() if isinstance(uid, bytes) else uid
+
+    def _header_bytes(self):
+        for sep in (b"\r\n\r\n", b"\n\n"):
+            if sep in self.raw_bytes:
+                return self.raw_bytes.split(sep, 1)[0] + sep
+        return self.raw_bytes
+
+    def select(self, folder):
+        self.selected = folder
         return "OK", []
+
+    def capability(self):
+        return "OK", [b" ".join(self.capabilities)]
 
     def uid(self, command, *args):
         if command == "FETCH":
+            if "HEADER" in args[1]:
+                self.fetched_headers.append(self._key(args[0]))
+                return "OK", [(b"1 (RFC822.HEADER)", self._header_bytes())]
+            self.fetched_full.append(self._key(args[0]))
             return "OK", [(b"1 (RFC822)", self.raw_bytes)]
-        if command == "MOVE":
-            self.moved_uids.append(args)
-        return "OK", []
+        if command == "STORE":
+            self.deleted.add(self._key(args[0]))
+            return "OK", []
+        if command == "EXPUNGE":
+            uid = self._key(args[0]) if args else None
+            if uid in self.deleted:
+                self.deleted.discard(uid)
+                self.expunged.append(uid)
+            return "OK", []
+        if command == "SEARCH":
+            remaining = [] if "1" in self.expunged else [b"1"]
+            return "OK", [b" ".join(remaining)]
+        raise AssertionError(f"unexpected IMAP command: {command}")
 
 
 class FakeSmtp:
@@ -246,7 +278,7 @@ class RoutingTest(unittest.TestCase):
             [(LIBREOFFICE_URL, "01-rep.docx"), (CHROMIUM_URL, "index.html")],
         )
         self.assertEqual(print_mock.call_count, 2)
-        self.assertEqual(fake_imap.moved_uids, [("1", poller.PROCESSED_FOLDER)])
+        self.assertEqual(fake_imap.expunged, ["1"])
 
     def test_skip_print_converts_and_skips_lp(self):
         poller.SKIP_PRINT = True
@@ -269,7 +301,7 @@ class RoutingTest(unittest.TestCase):
             poller.process(fake_imap, "1")
         # Real conversion happened; the print step short-circuits before `lp`.
         self.assertEqual(http_calls, [(LIBREOFFICE_URL, "01-rep.docx")])
-        self.assertEqual(fake_imap.moved_uids, [("1", poller.PROCESSED_FOLDER)])
+        self.assertEqual(fake_imap.expunged, ["1"])
         sent_messages = FakeSmtp.instances[-1].sent_messages
         self.assertEqual(len(sent_messages), 1)
         self.assertTrue(
@@ -381,15 +413,15 @@ class RetryTest(unittest.TestCase):
         # First attempt — transient failure, stays in SOURCE_FOLDER
         with mock.patch.object(poller, "print_file", side_effect=poller.TransientError("lp down")):
             poller.process(fake_imap, "1")
-        self.assertEqual(fake_imap.moved_uids, [])
+        self.assertEqual(fake_imap.expunged, [])
         state = poller._load_retries()
         self.assertEqual(state[key]["count"], 1)
 
-        # Second attempt — at cap, moves to REJECTED_FOLDER
+        # Second attempt — at cap, expunged
         fake_imap2 = FakeImap(msg.as_bytes())
         with mock.patch.object(poller, "print_file", side_effect=poller.TransientError("lp down")):
             poller.process(fake_imap2, "1")
-        self.assertEqual(fake_imap2.moved_uids, [("1", poller.REJECTED_FOLDER)])
+        self.assertEqual(fake_imap2.expunged, ["1"])
         state = poller._load_retries()
         self.assertNotIn(key, state)
 
@@ -414,6 +446,78 @@ class RetryTest(unittest.TestCase):
         msg["From"] = "a@example.com"
         key = poller._retry_key(msg)
         self.assertTrue(key.startswith("h:"))
+
+
+class DrainTest(unittest.TestCase):
+    def _build_message(self, frm="a@example.com", to="print@example.com"):
+        msg = EmailMessage()
+        msg["From"] = frm
+        msg["To"] = to
+        msg["Subject"] = "t"
+        msg["Message-ID"] = "<drain-test@example.com>"
+        msg.set_content("body")
+        return msg
+
+    def test_stranger_dropped_headers_only(self):
+        rejected_before = poller._state["rejected_total"]
+        fake_imap = FakeImap(self._build_message(frm="stranger@evil.example").as_bytes())
+        with mock.patch.object(poller.smtplib, "SMTP", FakeSmtp):
+            sent_before = sum(len(i.sent_messages) for i in FakeSmtp.instances)
+            poller.process(fake_imap, "1")
+            sent_after = sum(len(i.sent_messages) for i in FakeSmtp.instances)
+        # Body never downloaded, no reply, message expunged.
+        self.assertEqual(fake_imap.fetched_headers, ["1"])
+        self.assertEqual(fake_imap.fetched_full, [])
+        self.assertEqual(sent_after, sent_before)
+        self.assertEqual(fake_imap.expunged, ["1"])
+        self.assertEqual(poller._state["rejected_total"], rejected_before + 1)
+
+    def test_misaddressed_dropped(self):
+        fake_imap = FakeImap(self._build_message(to="someone@else.example").as_bytes())
+        poller.process(fake_imap, "1")
+        self.assertEqual(fake_imap.fetched_full, [])
+        self.assertEqual(fake_imap.expunged, ["1"])
+
+    def test_auth_failure_deleted_silently(self):
+        poller.REQUIRE_AUTH_PASS = True
+        self.addCleanup(lambda: setattr(poller, "REQUIRE_AUTH_PASS", False))
+        rejected_before = poller._state["rejected_total"]
+        fake_imap = FakeImap(self._build_message().as_bytes())
+        with mock.patch.object(poller.smtplib, "SMTP", FakeSmtp):
+            sent_before = sum(len(i.sent_messages) for i in FakeSmtp.instances)
+            poller.process(fake_imap, "1")
+            sent_after = sum(len(i.sent_messages) for i in FakeSmtp.instances)
+        self.assertEqual(sent_after, sent_before)
+        self.assertEqual(fake_imap.expunged, ["1"])
+        self.assertEqual(poller._state["rejected_total"], rejected_before + 1)
+
+    def test_uidplus_guard(self):
+        with self.assertRaises(SystemExit) as ctx:
+            poller._require_uidplus(FakeImap(b"", capabilities=(b"IMAP4rev1",)))
+        self.assertEqual(ctx.exception.code, 2)
+        # UIDPLUS advertised — no exit.
+        poller._require_uidplus(FakeImap(b""))
+
+    def test_poll_empties_mailbox(self):
+        retries_dir = tempfile.mkdtemp()
+        orig_retry_file = poller._RETRY_FILE
+        poller._RETRY_FILE = os.path.join(retries_dir, "retries.json")
+        self.addCleanup(setattr, poller, "_RETRY_FILE", orig_retry_file)
+
+        def _cleanup():
+            rf = os.path.join(retries_dir, "retries.json")
+            if os.path.exists(rf):
+                os.unlink(rf)
+            os.rmdir(retries_dir)
+
+        self.addCleanup(_cleanup)
+        stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
+        fake_imap = FakeImap(self._build_message().as_bytes())
+        with mock.patch.object(poller, "print_file", return_value="ok"):
+            poller.poll_once(fake_imap)
+        self.assertEqual(fake_imap.selected, poller.SOURCE_FOLDER)
+        self.assertEqual(fake_imap.expunged, ["1"])
+        self.assertEqual(poller._state["pending_messages"], 0)
 
 
 class HealthTest(unittest.TestCase):
