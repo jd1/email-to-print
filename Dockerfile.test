@@ -1,8 +1,13 @@
 # Test image: runs the unit tests plus the local e2e suite (fast, fake
-# Gotenberg). The build fails if either is red.
+# Gotenberg). pytest collects both, so one run is the whole suite.
+# The build fails if the suite is red.
 #   docker build -f Dockerfile.test -t email-to-print:test .
+# MOX_VERSION default matches tests/conftest.py (single source); override
+# with --build-arg if they ever drift.
+ARG MOX_VERSION=v0.0.17
 FROM golang:1-bookworm AS moxbuild
-RUN GOBIN=/out go install github.com/mjl-/mox@v0.0.17
+ARG MOX_VERSION
+RUN GOBIN=/out go install github.com/mjl-/mox@v${MOX_VERSION}
 
 FROM python:3.14-slim
 WORKDIR /repo
@@ -14,4 +19,4 @@ RUN pip install --no-cache-dir -r tests/requirements_test.txt
 COPY --from=moxbuild /out/mox /usr/local/bin/mox
 COPY . .
 ENV MOX_BIN=/usr/local/bin/mox
-RUN python -m unittest discover -s tests && python -m pytest -m "not slow"
+RUN python -m pytest -m "not slow"

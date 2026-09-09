@@ -23,10 +23,11 @@ jobs:
 
       - run: pip install -r poller/requirements.txt -r tests/requirements_test.txt
 
-      - run: python -m unittest discover -s tests -v
-
-      # Local e2e suite needs the mox binary only (fake Gotenberg/lp are in-repo).
-      # setup-go is a fallback: the gobuilds download usually wins.
+      # pytest collects both the unittest classes (test_poller.py) and the
+      # e2e suite, so this one run is the whole suite (minus slow).
+      # Local e2e tests need the mox binary only (fake Gotenberg/lp are in-repo).
+      # setup-go is present, so `go install` (GOSUMDB-verified) is the install
+      # path; the gobuilds mirror is only for dev machines without Go (Makefile).
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -34,12 +35,8 @@ jobs:
       - name: Install mox (local test mail server)
         run: |
           mkdir -p .tools
-          curl -sSL "https://beta.gobuilds.org/github.com/mjl-/mox@v0.0.17/linux-amd64-latest/" -o .tools/mox
-          chmod +x .tools/mox
-          if ! head -c 4 .tools/mox | grep -q ELF; then
-            rm -f .tools/mox
-            GOBIN=$PWD/.tools go install github.com/mjl-/mox@v0.0.17
-          fi
+          MOX_VERSION=$(grep -oP 'MOX_VERSION = "\K[^"]+' tests/conftest.py)
+          GOBIN=$PWD/.tools go install github.com/mjl-/mox@v${MOX_VERSION}
 
       - run: python -m pytest -m "not slow"
 
