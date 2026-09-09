@@ -663,7 +663,9 @@ def process(M, uid):
                 body_pdf = None
             if body_pdf:
                 jobs.append((body_pdf, "email body"))
-        elif not jobs and not errors:
+        if not jobs and not errors:
+            # Either PRINT_BODY is off or the body rendered to nothing: say so
+            # explicitly instead of failing with a blank error detail.
             errors.append("no printable attachment and no renderable body")
         # Phase 2: submit all converted jobs to CUPS.
         try:
