@@ -2,7 +2,13 @@
 """Unit tests for the Gotenberg conversion path. No IMAP/SMTP/network:
 `requests` is stubbed before poller is imported, `lp` is mocked per-test."""
 
-import os, sys, email, tempfile, types, time, unittest
+import email
+import os
+import sys
+import tempfile
+import time
+import types
+import unittest
 from email.message import EmailMessage
 from unittest import mock
 
@@ -53,7 +59,7 @@ _fake_requests_module.get = _fake_get
 sys.modules.setdefault("requests", _fake_requests_module)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "poller"))
-import poller
+import poller  # noqa: E402 - sys.path setup must precede local import
 
 FAKE_PDF = b"%PDF-1.4 fake"
 LIBREOFFICE_URL = "http://gotenberg.test:3000/forms/libreoffice/convert"
@@ -85,9 +91,7 @@ class ConversionTest(unittest.TestCase):
 
     def test_office_success(self):
         stub["post_handler"], http_calls[:] = self.ok_handler, []
-        output_path = poller.to_pdf(
-            self._write_source("report.docx"), self.output_dir.name
-        )
+        output_path = poller.to_pdf(self._write_source("report.docx"), self.output_dir.name)
         self.assertTrue(output_path and output_path.endswith("report.pdf"))
         with open(output_path, "rb") as output_file:
             self.assertEqual(output_file.read(), FAKE_PDF)
@@ -165,9 +169,7 @@ class BodyTest(unittest.TestCase):
 
         stub["post_handler"] = unexpected_call
         self.assertIsNone(
-            poller.render_body(
-                email.message_from_string("Subject: x\r\n"), self.output_dir.name
-            )
+            poller.render_body(email.message_from_string("Subject: x\r\n"), self.output_dir.name)
         )
 
 
@@ -255,9 +257,7 @@ class RoutingTest(unittest.TestCase):
         msg.set_content("a body")
         for filename, content_type, data in attachments:
             maintype, subtype = content_type.split("/")
-            msg.add_attachment(
-                data, maintype=maintype, subtype=subtype, filename=filename
-            )
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
         return msg
 
     def test_docx_and_txt_converted(self):
@@ -275,9 +275,7 @@ class RoutingTest(unittest.TestCase):
         )
 
         fake_imap = FakeImap(msg.as_bytes())
-        with mock.patch.object(
-            poller, "print_file", return_value="ok"
-        ) as print_mock:
+        with mock.patch.object(poller, "print_file", return_value="ok") as print_mock:
             poller.process(fake_imap, "1")
         self.assertEqual(
             http_calls,
@@ -310,9 +308,7 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(fake_imap.expunged, ["1"])
         sent_messages = FakeSmtp.instances[-1].sent_messages
         self.assertEqual(len(sent_messages), 1)
-        self.assertTrue(
-            sent_messages[0].get_content().startswith("Skipped printing: rep.docx")
-        )
+        self.assertTrue(sent_messages[0].get_content().startswith("Skipped printing: rep.docx"))
 
 
 class ExtensionTest(unittest.TestCase):
@@ -549,9 +545,7 @@ class DrainTest(unittest.TestCase):
 class VersionTest(unittest.TestCase):
     def setUp(self):
         orig_version = poller._state["gotenberg_version"]
-        self.addCleanup(
-            lambda: poller._state.__setitem__("gotenberg_version", orig_version)
-        )
+        self.addCleanup(lambda: poller._state.__setitem__("gotenberg_version", orig_version))
         poller._state["gotenberg_version"] = None
         http_calls[:] = []
 
@@ -559,9 +553,7 @@ class VersionTest(unittest.TestCase):
         stub["get_handler"] = lambda url: _response(200, b"8.36.0")
         poller._check_gotenberg_version()
         self.assertEqual(poller._state["gotenberg_version"], "8.36.0")
-        self.assertEqual(
-            http_calls, [("http://gotenberg.test:3000/version", None)]
-        )
+        self.assertEqual(http_calls, [("http://gotenberg.test:3000/version", None)])
 
     def test_version_unreachable_leaves_unset(self):
         def raise_connection_error(url):
@@ -584,7 +576,8 @@ class VersionTest(unittest.TestCase):
 
 class HealthTest(unittest.TestCase):
     def test_health_includes_pending_messages(self):
-        import io, json as _json
+        import io
+        import json as _json
 
         poller._state["pending_messages"] = 7
         handler = poller._Health.__new__(poller._Health)

@@ -25,15 +25,28 @@ Run with --once for a single poll cycle (exit 0 on success, 1 on failure);
 without it the poller loops forever.
 """
 
-import os, ssl, sys, time, email, subprocess, tempfile, logging, mimetypes
-from email.header import decode_header, make_header
-from email.utils import parseaddr, getaddresses, formatdate, make_msgid
-from email.message import EmailMessage
-import imaplib, smtplib, threading, json as _json
+import email
 import html as _html
-import requests
-import markdown
+import imaplib
+import json as _json
+import logging
+import mimetypes
+import os
+import smtplib
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from email.header import decode_header, make_header
+from email.message import EmailMessage
+from email.utils import formatdate, getaddresses, make_msgid, parseaddr
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any
+
+import markdown
+import requests
 
 
 class TransientError(Exception):
@@ -44,7 +57,7 @@ class PermanentError(Exception):
     """Non-retryable failure — expunge, do not retry."""
 
 
-def env(k, d=None, req=False):
+def env(k: str, d: Any = None, req: bool = False) -> Any:
     v = os.environ.get(k, d)
     if req and not v:
         logging.critical("missing required env %s", k)
@@ -66,9 +79,7 @@ SMTP_HOST = env("SMTP_HOST", "127.0.0.1")
 SMTP_PORT = int(env("SMTP_PORT", "1025"))
 PRINT_TO = env("PRINT_TO", req=True).lower()
 SOURCE_FOLDER = env("SOURCE_FOLDER", "INBOX")
-ALLOWED = set(
-    a.strip().lower() for a in env("ALLOWED_SENDERS", "").split(",") if a.strip()
-)
+ALLOWED = set(a.strip().lower() for a in env("ALLOWED_SENDERS", "").split(",") if a.strip())
 PRINTER = env("PRINTER", req=True)
 CUPS_SERVER = env("CUPS_SERVER", "127.0.0.1:631")
 GOTENBERG_URL = env("GOTENBERG_URL", "http://127.0.0.1:3000").rstrip("/")
@@ -90,8 +101,7 @@ HEALTH_BIND = env("HEALTH_BIND", "127.0.0.1")
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 if not TLS_VERIFY and not (IMAP_HOST in _LOCAL_HOSTS and SMTP_HOST in _LOCAL_HOSTS):
     logging.critical(
-        "TLS_VERIFY=false is only allowed for localhost (bridge). "
-        "IMAP_HOST=%s SMTP_HOST=%s",
+        "TLS_VERIFY=false is only allowed for localhost (bridge). IMAP_HOST=%s SMTP_HOST=%s",
         IMAP_HOST,
         SMTP_HOST,
     )
@@ -99,7 +109,7 @@ if not TLS_VERIFY and not (IMAP_HOST in _LOCAL_HOSTS and SMTP_HOST in _LOCAL_HOS
 
 os.environ["CUPS_SERVER"] = CUPS_SERVER
 HEALTH_PORT = int(env("HEALTH_PORT", "2631"))
-_state = {
+_state: dict[str, Any] = {
     "started": time.time(),
     "last_poll": None,
     "last_poll_ok": False,
@@ -110,7 +120,8 @@ _state = {
     "gotenberg_version": None,
 }
 
-def _default_state_dir():
+
+def _default_state_dir() -> str:
     xdg = os.environ.get("XDG_STATE_HOME")
     if xdg:
         return os.path.join(xdg, "mailprint")
@@ -122,7 +133,7 @@ _RETRY_FILE = os.path.join(_RETRY_DIR, "retries.json")
 _RETRY_GC_DAYS = 7
 
 
-def _load_retries():
+def _load_retries() -> Any:
     try:
         with open(_RETRY_FILE) as f:
             return _json.load(f)
@@ -130,7 +141,7 @@ def _load_retries():
         return {}
 
 
-def _save_retries(state):
+def _save_retries(state: dict[str, Any]) -> None:
     os.makedirs(_RETRY_DIR, exist_ok=True, mode=0o700)
     tmp = _RETRY_FILE + ".tmp"
     with open(tmp, "w") as f:
@@ -141,11 +152,11 @@ def _save_retries(state):
     os.replace(tmp, _RETRY_FILE)
 
 
-def _retry_key(msg):
+def _retry_key(msg: Any) -> str:
     """Generate a stable retry key from message headers."""
-    mid = msg.get("Message-ID", "")
+    mid: Any = msg.get("Message-ID", "")
     if mid:
-        return mid
+        return str(mid)
     # Fallback: hash Date + Subject + From
     parts = [
         msg.get("Date", ""),
@@ -157,25 +168,23 @@ def _retry_key(msg):
     return "h:" + hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _gc_retries(state):
+def _gc_retries(state: dict[str, Any]) -> dict[str, Any]:
     """Remove retry entries older than _RETRY_GC_DAYS."""
     cutoff = time.time() - (_RETRY_GC_DAYS * 86400)
     return {k: v for k, v in state.items() if v.get("ts", 0) >= cutoff}
 
 
 class _Health(BaseHTTPRequestHandler):
-    def log_message(self, *a):
+    def log_message(self, *a: Any) -> None:
         pass
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         if self.path.rstrip("/") not in ("/health", ""):
             self.send_response(404)
             self.end_headers()
             return
         ok = _state["last_poll_ok"] and _state["last_poll"] is not None
-        status = (
-            "ok" if ok else ("starting" if _state["last_poll"] is None else "degraded")
-        )
+        status = "ok" if ok else ("starting" if _state["last_poll"] is None else "degraded")
         lp = _state["last_poll"]
         body = _json.dumps(
             {
@@ -183,9 +192,7 @@ class _Health(BaseHTTPRequestHandler):
                 "printer": PRINTER,
                 "source": SOURCE_FOLDER,
                 "last_poll": (
-                    None
-                    if lp is None
-                    else time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(lp))
+                    None if lp is None else time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(lp))
                 ),
                 "printed_total": _state["printed_total"],
                 "rejected_total": _state["rejected_total"],
@@ -202,14 +209,14 @@ class _Health(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def _start_health():
+def _start_health() -> None:
     try:
         HTTPServer((HEALTH_BIND, HEALTH_PORT), _Health).serve_forever()
     except Exception as e:
         log.warning("health server failed: %s", e)
 
 
-def _check_gotenberg_version():
+def _check_gotenberg_version() -> None:
     """Record the Gotenberg server version once at startup.
 
     The poller only uses convert paths that are identical across v8
@@ -269,7 +276,7 @@ PRINT_CSS = (
 )
 
 
-def dh(s):
+def dh(s: Any) -> str:
     try:
         return str(make_header(decode_header(s or "")))
     except Exception as e:
@@ -277,14 +284,14 @@ def dh(s):
         return s or ""
 
 
-def addrs(msg, *headers):
-    vals = []
+def addrs(msg: Any, *headers: str) -> list[str]:
+    vals: list[str] = []
     for h in headers:
         vals += msg.get_all(h, [])
     return [a.lower() for _, a in getaddresses(vals) if a]
 
 
-def _tls_ctx():
+def _tls_ctx() -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     if not TLS_VERIFY:
         ctx.check_hostname = False
@@ -292,7 +299,8 @@ def _tls_ctx():
     return ctx
 
 
-def imap_connect():
+def imap_connect() -> Any:
+    M: Any
     if IMAP_SSL:
         M = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=_tls_ctx())
     else:
@@ -317,22 +325,22 @@ HDR_FIELDS = (
 )
 
 
-def _uid_str(uid):
+def _uid_str(uid: Any) -> str:
     """Decode a UID from IMAP responses (bytes from SEARCH) for logging."""
     return uid.decode("ascii", errors="replace") if isinstance(uid, bytes) else str(uid)
 
 
-def fetch_headers(M, uid):
+def fetch_headers(M: Any, uid: Any) -> Any:
     """Fetch only routing headers; BODY.PEEK leaves \\Seen unset."""
     fields = " ".join(HDR_FIELDS)
-    typ, data = M.uid("FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (%s)])" % fields)
+    typ, data = M.uid("FETCH", uid, f"(BODY.PEEK[HEADER.FIELDS ({fields})])")
     if typ != "OK" or not data or not data[0]:
         log.warning("header fetch failed uid=%s type=%s (skipped, will retry)", _uid_str(uid), typ)
         return None
     return email.message_from_bytes(data[0][1])
 
 
-def delete_uid(M, uid):
+def delete_uid(M: Any, uid: Any) -> None:
     """Mark \\Deleted and expunge just this UID (requires UIDPLUS)."""
     typ, _ = M.uid("STORE", uid, "+FLAGS.SILENT", r"(\Deleted)")
     if typ != "OK":
@@ -342,7 +350,7 @@ def delete_uid(M, uid):
         raise TransientError(f"EXPUNGE uid={_uid_str(uid)} failed")
 
 
-def stranger_drop(M, uid, msg, why):
+def stranger_drop(M: Any, uid: Any, msg: Any, why: str) -> None:
     """Log and silently expunge a message that must never print."""
     log.warning(
         "DROP %s: from=%s date=%s subj=%r",
@@ -355,7 +363,7 @@ def stranger_drop(M, uid, msg, why):
     _state["rejected_total"] += 1
 
 
-def _server_capabilities(M):
+def _server_capabilities(M: Any) -> set[str]:
     try:
         typ, data = M.capability()
     except Exception as e:
@@ -371,7 +379,7 @@ def _server_capabilities(M):
     return caps
 
 
-def _require_uidplus(M):
+def _require_uidplus(M: Any) -> None:
     if "UIDPLUS" not in _server_capabilities(M):
         logging.critical(
             "IMAP server does not advertise UIDPLUS (UID EXPUNGE); "
@@ -380,7 +388,7 @@ def _require_uidplus(M):
         sys.exit(2)
 
 
-def print_file(path, opts):
+def print_file(path: str, opts: dict[str, str]) -> str:
     """Submit one PDF to CUPS; return the lp output detail string.
 
     Raises TransientError when the job was not accepted (safe to retry).
@@ -393,12 +401,11 @@ def print_file(path, opts):
     if DRY_RUN:
         return "dry-run"
     if SKIP_PRINT:
-        log.info(
-            "[skip-print] %s converted, not submitting to CUPS", os.path.basename(path)
-        )
+        log.info("[skip-print] %s converted, not submitting to CUPS", os.path.basename(path))
         return "skip-print"
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=LP_TIMEOUT)
+        # No shell; cmd is built from config + a converted temp file path.
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=LP_TIMEOUT)  # noqa: S603
         if r.returncode != 0:
             raise TransientError(f"lp failed (rc={r.returncode}): {r.stdout + r.stderr}".strip())
         return (r.stdout + r.stderr).strip()
@@ -408,7 +415,7 @@ def print_file(path, opts):
         raise TransientError(f"lp error: {e}") from e
 
 
-def _gotenberg_post(route, filename, content):
+def _gotenberg_post(route: str, filename: str, content: bytes) -> bytes:
     """POST one file to Gotenberg; return PDF bytes.
 
     Raises TransientError on connection/timeout/server errors (safe to retry)
@@ -456,7 +463,7 @@ def _gotenberg_post(route, filename, content):
     return response.content
 
 
-def to_pdf(source_path, output_dir):
+def to_pdf(source_path: str, output_dir: str) -> str:
     """Office doc -> PDF via Gotenberg's LibreOffice route.
 
     Propagates TransientError/PermanentError from Gotenberg.
@@ -474,7 +481,7 @@ def to_pdf(source_path, output_dir):
     return output_path
 
 
-def convert_markup(source_path, output_dir, ext):
+def convert_markup(source_path: str, output_dir: str, ext: str) -> str:
     """HTML/markdown/text file -> PDF via Gotenberg's Chromium route.
 
     `.html`/`.htm` go through as-is; `.md`/`.markdown` render via
@@ -498,24 +505,24 @@ def convert_markup(source_path, output_dir, ext):
             + inner
             + "</body></html>"
         ).encode()
-    return convert_html(page_bytes, output_dir, os.path.splitext(os.path.basename(source_path))[0] or "doc")
+    return convert_html(
+        page_bytes, output_dir, os.path.splitext(os.path.basename(source_path))[0] or "doc"
+    )
 
 
-def convert_html(html_bytes, output_dir, name_stem):
+def convert_html(html_bytes: bytes, output_dir: str, name_stem: str) -> str:
     """HTML -> PDF via Gotenberg's Chromium route (upload must be index.html).
 
     Propagates TransientError/PermanentError from Gotenberg.
     """
-    pdf_bytes = _gotenberg_post(
-        "/forms/chromium/convert/html", "index.html", html_bytes
-    )
+    pdf_bytes = _gotenberg_post("/forms/chromium/convert/html", "index.html", html_bytes)
     output_path = os.path.join(output_dir, name_stem + ".pdf")
     with open(output_path, "wb") as output_file:
         output_file.write(pdf_bytes)
     return output_path
 
 
-def render_body(msg, output_dir):
+def render_body(msg: Any, output_dir: str) -> str | None:
     html_bytes = text_bytes = None
     for part in msg.walk():
         if part.get_content_maintype() == "multipart":
@@ -531,31 +538,27 @@ def render_body(msg, output_dir):
         return convert_html(html_bytes, output_dir, "email-body")
     if text_bytes:
         escaped_body = (
-            "<pre>"
-            + _html.escape(text_bytes.decode("utf-8", errors="replace"))
-            + "</pre>"
+            "<pre>" + _html.escape(text_bytes.decode("utf-8", errors="replace")) + "</pre>"
         )
         page_bytes = (
-            "<html><head><meta charset='utf-8'></head><body>"
-            + escaped_body
-            + "</body></html>"
+            "<html><head><meta charset='utf-8'></head><body>" + escaped_body + "</body></html>"
         ).encode()
         return convert_html(page_bytes, output_dir, "email-body")
     return None
 
 
-def _print_label():
+def _print_label() -> str:
     return "Skipped printing: " if SKIP_PRINT else "Queued for printing: "
 
 
-def auth_ok(msg):
+def auth_ok(msg: Any) -> bool:
     if not REQUIRE_AUTH_PASS:
         return True
     ar = " ".join(msg.get_all("Authentication-Results", [])).lower()
     return "spf=pass" in ar or "dkim=pass" in ar
 
 
-def send_reply(orig, to_addr, status, detail):
+def send_reply(orig: Any, to_addr: str, status: str, detail: str) -> None:
     if not CONFIRM_REPLY or not to_addr:
         return
     try:
@@ -576,14 +579,12 @@ def send_reply(orig, to_addr, status, detail):
         log.warning("confirm reply failed: %s", e)
 
 
-def process(M, uid):
+def process(M: Any, uid: Any) -> None:
     # Phase 0: headers only — strangers never cost more than a few KB.
     hdr = fetch_headers(M, uid)
     if hdr is None:
         return
-    if PRINT_TO not in addrs(
-        hdr, "To", "Cc", "Delivered-To", "X-Original-To", "X-Forwarded-To"
-    ):
+    if PRINT_TO not in addrs(hdr, "To", "Cc", "Delivered-To", "X-Original-To", "X-Forwarded-To"):
         stranger_drop(M, uid, hdr, f"not addressed to {PRINT_TO}")
         return
     frm = parseaddr(hdr.get("From", ""))[1].lower()
@@ -601,10 +602,11 @@ def process(M, uid):
     if typ != "OK" or not data or not data[0]:
         return
     msg = email.message_from_bytes(data[0][1])
-    printed, errors = [], []
+    printed: list[str] = []
+    errors: list[str] = []
     with tempfile.TemporaryDirectory() as wd:
         # Phase 1: convert attachments and collect print jobs.
-        jobs = []
+        jobs: list[tuple[str, str]] = []
         idx = 0
         for part in msg.walk():
             if part.get_content_maintype() == "multipart":
@@ -617,6 +619,9 @@ def process(M, uid):
             payload = part.get_payload(decode=True)
             if not payload:
                 continue
+            if not isinstance(payload, (bytes, bytearray)):
+                errors.append(f"{fn or ctype}: unreadable payload")
+                continue
             if len(payload) > MAX_MB * 1024 * 1024:
                 errors.append(f"{fn or ctype}: exceeds {MAX_MB}MB")
                 continue
@@ -627,15 +632,14 @@ def process(M, uid):
                 else "attachment" + (mimetypes.guess_extension(ctype) or ".bin")
             )
             clean = (
-                "".join(c if c.isalnum() or c in "._- " else "_" for c in raw)[
-                    -120:
-                ].strip(". ")
+                "".join(c if c.isalnum() or c in "._- " else "_" for c in raw)[-120:].strip(". ")
                 or "attachment.bin"
             )
             idx += 1
             safe = os.path.join(wd, f"{idx:02d}-{clean}")
             with open(safe, "wb") as f:
                 f.write(payload)
+            target: str = safe
             if ctype in NATIVE_CTYPES or ext in NATIVE_EXT:
                 target = safe
             elif ext in OFFICE_EXT:
@@ -735,7 +739,7 @@ def process(M, uid):
         log.warning("NO-PRINT errors=%s", errors)
 
 
-def poll_once(M):
+def poll_once(M: Any) -> None:
     # Expire stale retry entries every cycle so the state file cannot grow
     # unboundedly when no transient failure triggers a GC.
     retries = _load_retries()
@@ -767,9 +771,13 @@ def poll_once(M):
     _state["last_poll_ok"] = True
 
 
-def main(once=False):
+def main(once: bool = False) -> None:
+    startup_msg = (
+        "print-poller up: user=%s source=%s printer=%s match=%s "
+        "print_body=%s allow=%s dry=%s skip_print=%s once=%s"
+    )
     log.info(
-        "print-poller up: user=%s source=%s printer=%s match=%s print_body=%s allow=%s dry=%s skip_print=%s once=%s",
+        startup_msg,
         IMAP_USER,
         SOURCE_FOLDER,
         PRINTER,
