@@ -37,6 +37,13 @@ def wait_for(fn, timeout, what):
         time.sleep(0.5)
 
 
+def _printed_total_is(raw_body, expected):
+    if not raw_body:
+        return None
+    body = json.loads(raw_body)
+    return raw_body if body["printed_total"] == expected else None
+
+
 def test_long_running_poller(mox, make_env, fakebin, gotenberg, tmp_path):
     subj = f"print {uid_hex()}"
     env = make_env(POLL_INTERVAL="1", GOTENBERG_URL=gotenberg.url)
@@ -87,14 +94,27 @@ def test_long_running_poller(mox, make_env, fakebin, gotenberg, tmp_path):
             assert reply is not None
             assert reply["Subject"] == f"Print queued: {s}"
 
-        # two sequential messages: the loop keeps polling, it isn't --once
+        # two sequential messages: the loop keeps polling, it isn't --once.
+        # printed_total increments after the reply is sent, so wait for the
+        # counter instead of reading it straight after the reply lands.
         process_one(subj)
-        h1 = json.loads(healthy_body())
-        assert h1["printed_total"] == 1
+        h1 = json.loads(
+            wait_for(
+                lambda: _printed_total_is(healthy_body(), 1),
+                30,
+                "printed_total == 1",
+            )
+        )
         assert h1["pending_messages"] == 0
 
         process_one(f"print {uid_hex()}")
-        h2 = json.loads(healthy_body())
+        h2 = json.loads(
+            wait_for(
+                lambda: _printed_total_is(healthy_body(), 2),
+                30,
+                "printed_total == 2",
+            )
+        )
         assert h2["printed_total"] == 2
     except Exception:
         logf.flush()

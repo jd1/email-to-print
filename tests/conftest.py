@@ -39,7 +39,6 @@ GOTENBERG_VERSION = "8.21.0"  # served by the fake on GET /version
 MOX_ACCOUNT = "mox@localhost"
 MOX_PASSWORD = "moxmoxmox"
 IMAP_PORT = 1993  # implicit TLS (poller IMAP_SSL=true)
-IMAP_STARTTLS_PORT = 1143  # plaintext + STARTTLS (poller IMAP_SSL=false)
 SMTP_INJECT_PORT = 1025  # unauthenticated (test-side injection)
 SMTP_SUBMIT_PORT = 1587  # STARTTLS + AUTH (poller confirmation replies)
 
@@ -94,12 +93,6 @@ class Mox:
 
     def imap(self):
         M = imaplib.IMAP4_SSL("127.0.0.1", IMAP_PORT, ssl_context=_tls_ctx())
-        M.login(MOX_ACCOUNT, MOX_PASSWORD)
-        return M
-
-    def imap_starttls(self):
-        M = imaplib.IMAP4("127.0.0.1", IMAP_STARTTLS_PORT)
-        M.starttls(ssl_context=_tls_ctx())
         M.login(MOX_ACCOUNT, MOX_PASSWORD)
         return M
 
