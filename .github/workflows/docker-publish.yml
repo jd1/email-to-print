@@ -36,7 +36,7 @@ jobs:
         run: |
           mkdir -p .tools
           MOX_VERSION=$(grep -oP 'MOX_VERSION = "\K[^"]+' tests/conftest.py)
-          GOBIN=$PWD/.tools go install github.com/mjl-/mox@v${MOX_VERSION}
+          GOBIN=$PWD/.tools go install github.com/mjl-/mox@${MOX_VERSION}
 
       - run: python -m pytest -m "not slow"
 
