@@ -1,0 +1,17 @@
+# Test image: runs the unit tests plus the local e2e suite (fast, fake
+# Gotenberg). The build fails if either is red.
+#   docker build -f Dockerfile.test -t email-to-print:test .
+FROM golang:1-bookworm AS moxbuild
+RUN GOBIN=/out go install github.com/mjl-/mox@v0.0.17
+
+FROM python:3.14-slim
+WORKDIR /repo
+# keep the relative layout: tests/requirements_test.txt includes
+# ../poller/requirements.txt
+COPY poller/requirements.txt poller/requirements.txt
+COPY tests/requirements_test.txt tests/requirements_test.txt
+RUN pip install --no-cache-dir -r tests/requirements_test.txt
+COPY --from=moxbuild /out/mox /usr/local/bin/mox
+COPY . .
+ENV MOX_BIN=/usr/local/bin/mox
+RUN python -m unittest discover -s tests && python -m pytest -m "not slow"

@@ -149,6 +149,22 @@ applies, except where it mentions `soffice`/LibreOffice inside the poller.
 6. Send yourself a test with `DRY_RUN=true` first. The logs show what would
    have printed. Then flip it off.
 
+## Tests
+
+Two layers. `tests/test_poller.py` are unit tests for the conversion path
+(`requests` stubbed, no network). `tests/test_e2e_*.py` are end-to-end: a
+real mail server (mox, `localserve` on localhost), a fake Gotenberg service
+and a fake `lp` on PATH, and the poller itself as a subprocess. No docker,
+no network beyond localhost, and nothing in the poller is mocked.
+
+    make test       # fast suite, fake Gotenberg (~15 seconds)
+    make test-slow  # everything, including one real Gotenberg conversion
+
+`make mox` fetches a pinned mox binary into `.tools/` (falling back to `go
+install` if the download serves a build page instead of a binary). The slow
+test needs a real Gotenberg (e.g. `docker compose up -d gotenberg`) and
+skips itself without one.
+
 ## Testing a pull request on your own server
 
 Only PRs I explicitly pick get a Docker image: add the `test-image` label
