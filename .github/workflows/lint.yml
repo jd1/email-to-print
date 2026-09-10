@@ -29,5 +29,5 @@ jobs:
           python-version: "3.14"
 
       - run: pip install -r poller/requirements.txt
-      - run: pip install mypy==1.18.2 types-requests
+      - run: pip install mypy==1.18.2 types-requests types-Markdown
       - run: mypy poller/

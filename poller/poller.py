@@ -43,7 +43,7 @@ from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import formatdate, getaddresses, make_msgid, parseaddr
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
+from typing import Any, TypedDict, cast
 
 import markdown
 import requests
@@ -133,15 +133,25 @@ _RETRY_FILE = os.path.join(_RETRY_DIR, "retries.json")
 _RETRY_GC_DAYS = 7
 
 
-def _load_retries() -> Any:
+class RetryEntry(TypedDict, total=False):
+    count: int
+    ts: float
+
+
+def _load_retries() -> dict[str, RetryEntry]:
     try:
         with open(_RETRY_FILE) as f:
-            return _json.load(f)
-    except (FileNotFoundError, _json.JSONDecodeError):
+            loaded: Any = _json.load(f)
+    except (OSError, ValueError):
+        # Missing/unreadable file, or corrupt JSON (JSONDecodeError is a
+        # ValueError). Reset to empty rather than failing the poll cycle.
         return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {k: cast("RetryEntry", v) for k, v in loaded.items() if isinstance(v, dict)}
 
 
-def _save_retries(state: dict[str, Any]) -> None:
+def _save_retries(state: dict[str, RetryEntry]) -> None:
     os.makedirs(_RETRY_DIR, exist_ok=True, mode=0o700)
     tmp = _RETRY_FILE + ".tmp"
     with open(tmp, "w") as f:
@@ -168,7 +178,7 @@ def _retry_key(msg: Any) -> str:
     return "h:" + hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _gc_retries(state: dict[str, Any]) -> dict[str, Any]:
+def _gc_retries(state: dict[str, RetryEntry]) -> dict[str, RetryEntry]:
     """Remove retry entries older than _RETRY_GC_DAYS."""
     cutoff = time.time() - (_RETRY_GC_DAYS * 86400)
     return {k: v for k, v in state.items() if v.get("ts", 0) >= cutoff}
@@ -639,7 +649,7 @@ def process(M: Any, uid: Any) -> None:
             safe = os.path.join(wd, f"{idx:02d}-{clean}")
             with open(safe, "wb") as f:
                 f.write(payload)
-            target: str = safe
+            target: str
             if ctype in NATIVE_CTYPES or ext in NATIVE_EXT:
                 target = safe
             elif ext in OFFICE_EXT:
@@ -677,7 +687,7 @@ def process(M: Any, uid: Any) -> None:
         except TransientError as exc:
             retries = _gc_retries(_load_retries())
             key = _retry_key(msg)
-            entry = retries.get(key, {"count": 0})
+            entry: RetryEntry = retries.get(key, {"count": 0, "ts": time.time()})
             entry["count"] = entry.get("count", 0) + 1
             entry["ts"] = time.time()
             retries[key] = entry
