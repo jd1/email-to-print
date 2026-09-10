@@ -115,6 +115,11 @@ class ConversionTest(unittest.TestCase):
         with self.assertRaises(poller.PermanentError):
             poller.to_pdf(self._write_source("a.docx"), self.output_dir.name)
 
+    def test_office_http_400(self):
+        stub["post_handler"] = lambda url, files: _response(400, b"bad request")
+        with self.assertRaises(poller.PermanentError):
+            poller.to_pdf(self._write_source("a.docx"), self.output_dir.name)
+
     def test_office_non_pdf_response_body(self):
         stub["post_handler"] = lambda url, files: _response(200, b"not a pdf")
         with self.assertRaises(poller.PermanentError):
@@ -170,6 +175,26 @@ class BodyTest(unittest.TestCase):
         stub["post_handler"] = unexpected_call
         self.assertIsNone(
             poller.render_body(email.message_from_string("Subject: x\r\n"), self.output_dir.name)
+        )
+
+    def test_empty_mail_reply_names_the_problem(self):
+        # render_body returns None without raising: process() must still say
+        # why nothing printed instead of sending a blank error detail.
+        poller.CONFIRM_REPLY = True
+        self.addCleanup(lambda: setattr(poller, "CONFIRM_REPLY", False))
+        msg = EmailMessage()
+        msg["From"] = "a@example.com"
+        msg["To"] = "print@example.com"
+        msg["Subject"] = "empty"
+        msg["Message-ID"] = "<empty-body@example.com>"
+        fake_imap = FakeImap(msg.as_bytes())
+        with mock.patch.object(poller.smtplib, "SMTP", FakeSmtp):
+            poller.process(fake_imap, "1")
+        self.assertEqual(fake_imap.expunged, ["1"])
+        reply = FakeSmtp.instances[-1].sent_messages[-1]
+        self.assertEqual(reply["Subject"], "Print failed: empty")
+        self.assertIn(
+            "no printable attachment and no renderable body", reply.get_content()
         )
 
 
@@ -309,6 +334,175 @@ class RoutingTest(unittest.TestCase):
         sent_messages = FakeSmtp.instances[-1].sent_messages
         self.assertEqual(len(sent_messages), 1)
         self.assertTrue(sent_messages[0].get_content().startswith("Skipped printing: rep.docx"))
+
+    def _no_http(self, url, files):
+        raise AssertionError("no conversion expected on the native path")
+
+    def test_image_attachment_prints_natively(self):
+        stub["post_handler"] = self._no_http
+        http_calls[:] = []
+        msg = self._build_message([("photo.jpg", "image/jpeg", b"\xff\xd8fake")])
+        fake_imap = FakeImap(msg.as_bytes())
+        with mock.patch.object(poller, "print_file", return_value="ok") as print_mock:
+            poller.process(fake_imap, "1")
+        self.assertEqual(http_calls, [])
+        self.assertEqual(print_mock.call_count, 1)
+        self.assertTrue(print_mock.call_args[0][0].endswith("01-photo.jpg"))
+        self.assertEqual(fake_imap.expunged, ["1"])
+
+    def _routed_message(self, **headers):
+        msg = EmailMessage()
+        msg["From"] = "a@example.com"
+        msg["To"] = headers.pop("To", "someone@else.example")
+        msg["Subject"] = "t"
+        for key, value in headers.items():
+            msg[key.replace("_", "-")] = value
+        return msg
+
+    def test_cc_address_routes(self):
+        msg = self._routed_message(Cc="print@example.com")
+        msg.set_content("body")
+        fake_imap = FakeImap(msg.as_bytes())
+        stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
+        with mock.patch.object(poller, "print_file", return_value="ok") as print_mock:
+            poller.process(fake_imap, "1")
+        self.assertEqual(print_mock.call_count, 1)
+        self.assertEqual(fake_imap.expunged, ["1"])
+
+    def test_delivered_to_header_routes(self):
+        msg = self._routed_message(**{"Delivered_To": "print@example.com"})
+        msg.set_content("body")
+        fake_imap = FakeImap(msg.as_bytes())
+        stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
+        with mock.patch.object(poller, "print_file", return_value="ok") as print_mock:
+            poller.process(fake_imap, "1")
+        self.assertEqual(print_mock.call_count, 1)
+        self.assertEqual(fake_imap.expunged, ["1"])
+
+    def test_x_original_to_header_routes(self):
+        msg = self._routed_message(**{"X_Original_To": "print@example.com"})
+        msg.set_content("body")
+        fake_imap = FakeImap(msg.as_bytes())
+        stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
+        with mock.patch.object(poller, "print_file", return_value="ok") as print_mock:
+            poller.process(fake_imap, "1")
+        self.assertEqual(print_mock.call_count, 1)
+        self.assertEqual(fake_imap.expunged, ["1"])
+
+    def test_inline_part_with_filename_counts_as_attachment(self):
+        stub["post_handler"] = self._no_http
+        msg = EmailMessage()
+        msg["From"] = "a@example.com"
+        msg["To"] = "print@example.com"
+        msg["Subject"] = "t"
+        msg.set_content("see below")
+        msg.add_attachment(
+            b"fakepng",
+            maintype="image",
+            subtype="png",
+            filename="pic.png",
+            disposition="inline",
+        )
+        fake_imap = FakeImap(msg.as_bytes())
+        with mock.patch.object(poller, "print_file", return_value="ok") as print_mock:
+            poller.process(fake_imap, "1")
+        self.assertEqual(print_mock.call_count, 1)
+        self.assertTrue(print_mock.call_args[0][0].endswith("01-pic.png"))
+        self.assertEqual(fake_imap.expunged, ["1"])
+
+    def test_multiple_attachments_print_in_order(self):
+        stub["post_handler"] = self._no_http
+        msg = self._build_message(
+            [
+                ("a.pdf", "application/pdf", b"%PDF-1.4 a"),
+                ("b.png", "image/png", b"\x89pngb"),
+            ]
+        )
+        fake_imap = FakeImap(msg.as_bytes())
+        with mock.patch.object(poller, "print_file", return_value="ok") as print_mock:
+            poller.process(fake_imap, "1")
+        printed = [c[0][0] for c in print_mock.call_args_list]
+        self.assertEqual(len(printed), 2)
+        self.assertTrue(printed[0].endswith("01-a.pdf"))
+        self.assertTrue(printed[1].endswith("02-b.png"))
+        self.assertEqual(fake_imap.expunged, ["1"])
+
+    def test_unsupported_attachment_falls_back_to_body(self):
+        stub["post_handler"] = lambda url, files: _response(200, FAKE_PDF)
+        http_calls[:] = []
+        msg = self._build_message([("data.xyz", "application/octet-stream", b"???")])
+        fake_imap = FakeImap(msg.as_bytes())
+        with mock.patch.object(poller, "print_file", return_value="ok") as print_mock:
+            poller.process(fake_imap, "1")
+        # unsupported file skipped, text body rendered via Chromium instead
+        self.assertEqual(http_calls, [(CHROMIUM_URL, "index.html")])
+        self.assertEqual(print_mock.call_count, 1)
+        self.assertTrue(print_mock.call_args[0][0].endswith("email-body.pdf"))
+        self.assertEqual(fake_imap.expunged, ["1"])
+
+    def test_oversize_attachment_rejected(self):
+        poller.PRINT_BODY = False
+        self.addCleanup(lambda: setattr(poller, "PRINT_BODY", True))
+        poller.MAX_MB = 1.0
+        self.addCleanup(lambda: setattr(poller, "MAX_MB", 25))
+        poller.CONFIRM_REPLY = True
+        self.addCleanup(lambda: setattr(poller, "CONFIRM_REPLY", False))
+        msg = self._build_message(
+            [("big.pdf", "application/pdf", b"\0" * (2 * 1024 * 1024))]
+        )
+        fake_imap = FakeImap(msg.as_bytes())
+        with mock.patch.object(poller.smtplib, "SMTP", FakeSmtp):
+            poller.process(fake_imap, "1")
+        self.assertEqual(fake_imap.expunged, ["1"])
+        reply = FakeSmtp.instances[-1].sent_messages[-1]
+        self.assertEqual(reply["Subject"], "Print failed: t")
+        self.assertIn("big.pdf: exceeds 1.0MB", reply.get_content())
+
+    def test_hostile_filenames_neutralized(self):
+        stub["post_handler"] = self._no_http
+        cases = [
+            ("../../evil.pdf", "01-evil.pdf"),
+            ("/abs/path.pdf", "01-path.pdf"),
+            ("...", "01-attachment.bin"),
+            ("a" * 200 + ".pdf", "01-" + "a" * 116 + ".pdf"),
+        ]
+        for hostile, expected in cases:
+            with self.subTest(filename=hostile):
+                msg = self._build_message([(hostile, "application/pdf", b"%PDF-1.4 x")])
+                fake_imap = FakeImap(msg.as_bytes())
+                with mock.patch.object(
+                    poller, "print_file", return_value="ok"
+                ) as print_mock:
+                    poller.process(fake_imap, "1")
+                self.assertEqual(print_mock.call_count, 1)
+                self.assertTrue(
+                    print_mock.call_args[0][0].endswith(expected),
+                    print_mock.call_args[0][0],
+                )
+                self.assertEqual(fake_imap.expunged, ["1"])
+
+    def test_partial_reply_joins_printed_and_errors(self):
+        poller.MAX_MB = 1.0
+        self.addCleanup(lambda: setattr(poller, "MAX_MB", 25))
+        poller.CONFIRM_REPLY = True
+        self.addCleanup(lambda: setattr(poller, "CONFIRM_REPLY", False))
+        msg = self._build_message(
+            [
+                ("good.pdf", "application/pdf", b"%PDF-1.4 good"),
+                ("big.pdf", "application/pdf", b"\0" * (2 * 1024 * 1024)),
+            ]
+        )
+        fake_imap = FakeImap(msg.as_bytes())
+        with mock.patch.object(
+            poller, "print_file", return_value="ok"
+        ), mock.patch.object(poller.smtplib, "SMTP", FakeSmtp):
+            poller.process(fake_imap, "1")
+        self.assertEqual(fake_imap.expunged, ["1"])
+        reply = FakeSmtp.instances[-1].sent_messages[-1]
+        self.assertEqual(reply["Subject"], "Print partial: t")
+        body = reply.get_content()
+        self.assertIn("Queued for printing: good.pdf", body)
+        self.assertIn("big.pdf: exceeds 1.0MB", body)
 
 
 class ExtensionTest(unittest.TestCase):
@@ -620,6 +814,112 @@ class HealthTest(unittest.TestCase):
         self.assertEqual(data["pending_messages"], 7)
         self.assertIn("status", data)
         self.assertIn("uptime_s", data)
+
+    def test_health_unknown_path_404(self):
+        import io
+
+        handler = poller._Health.__new__(poller._Health)
+        handler.path = "/nope"
+        responses = []
+        handler.send_response = responses.append
+        handler.end_headers = lambda: None
+        handler.do_GET()
+        self.assertEqual(responses, [404])
+
+
+class AuthTest(unittest.TestCase):
+    def _headers(self, results=None):
+        msg = EmailMessage()
+        msg["From"] = "a@example.com"
+        msg["To"] = "print@example.com"
+        if results is not None:
+            msg["Authentication-Results"] = results
+        return msg
+
+    def test_auth_not_required(self):
+        poller.REQUIRE_AUTH_PASS = False
+        self.addCleanup(lambda: setattr(poller, "REQUIRE_AUTH_PASS", False))
+        self.assertTrue(poller.auth_ok(self._headers()))
+
+    def test_auth_spf_pass(self):
+        poller.REQUIRE_AUTH_PASS = True
+        self.addCleanup(lambda: setattr(poller, "REQUIRE_AUTH_PASS", False))
+        self.assertTrue(
+            poller.auth_ok(
+                self._headers("mx.example; spf=pass smtp.mailfrom=a@example.com")
+            )
+        )
+
+    def test_auth_dkim_pass(self):
+        poller.REQUIRE_AUTH_PASS = True
+        self.addCleanup(lambda: setattr(poller, "REQUIRE_AUTH_PASS", False))
+        self.assertTrue(
+            poller.auth_ok(self._headers("mx.example; dkim=pass header.d=example.com"))
+        )
+
+    def test_auth_missing_header_fails(self):
+        poller.REQUIRE_AUTH_PASS = True
+        self.addCleanup(lambda: setattr(poller, "REQUIRE_AUTH_PASS", False))
+        self.assertFalse(poller.auth_ok(self._headers()))
+
+    def test_auth_failed_values_fail(self):
+        poller.REQUIRE_AUTH_PASS = True
+        self.addCleanup(lambda: setattr(poller, "REQUIRE_AUTH_PASS", False))
+        self.assertFalse(
+            poller.auth_ok(self._headers("mx.example; spf=fail; dkim=fail"))
+        )
+
+
+class PrintFileTest(unittest.TestCase):
+    def test_builds_lp_command(self):
+        with mock.patch.object(poller.subprocess, "run") as run_mock:
+            run_mock.return_value = mock.Mock(returncode=0, stdout="req 1", stderr="")
+            poller.print_file(
+                "/tmp/01-x.pdf", {"sides": "one-sided", "media": "letter"}
+            )
+        run_mock.assert_called_once()
+        cmd = run_mock.call_args[0][0]
+        self.assertEqual(
+            cmd,
+            [
+                "lp",
+                "-d",
+                "TEST",
+                "-o",
+                "sides=one-sided",
+                "-o",
+                "media=letter",
+                "--",
+                "/tmp/01-x.pdf",
+            ],
+        )
+
+    def test_nonzero_exit_is_transient(self):
+        with mock.patch.object(poller.subprocess, "run") as run_mock:
+            run_mock.return_value = mock.Mock(returncode=1, stdout="", stderr="no cups")
+            with self.assertRaises(poller.TransientError) as ctx:
+                poller.print_file("/tmp/01-x.pdf", {})
+        self.assertIn("rc=1", str(ctx.exception))
+
+    def test_missing_binary_is_transient(self):
+        with mock.patch.object(poller.subprocess, "run") as run_mock:
+            run_mock.side_effect = FileNotFoundError("lp")
+            with self.assertRaises(poller.TransientError):
+                poller.print_file("/tmp/01-x.pdf", {})
+
+    def test_dry_run_skips_exec(self):
+        poller.DRY_RUN = True
+        self.addCleanup(lambda: setattr(poller, "DRY_RUN", False))
+
+        def unexpected_call(*args, **kwargs):
+            raise AssertionError("no lp exec expected in dry-run mode")
+
+        with mock.patch.object(
+            poller.subprocess, "run", side_effect=unexpected_call
+        ) as run_mock:
+            detail = poller.print_file("/tmp/01-x.pdf", {})
+        self.assertTrue(detail)
+        run_mock.assert_not_called()
 
 
 if __name__ == "__main__":

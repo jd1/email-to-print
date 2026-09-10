@@ -1,6 +1,3 @@
 -r ../poller/requirements.txt
 pytest
 black
-bandit
-mypy
-types-requests
